@@ -1,24 +1,1656 @@
+# # #!/usr/bin/env python3
+# # """
+# # Enhanced MCP Client with proper image handling for LangChain
+# # Supports screenshot analysis by converting images to base64 format
+# # """
+
+# # import asyncio
+# # import json
+# # import subprocess
+# # import logging
+# # import base64
+# # from typing import Any, Dict, List, Optional, Union
+# # from pathlib import Path
+# # from io import BytesIO
+
+# # from langchain.agents import AgentExecutor, create_tool_calling_agent
+# # from langchain.prompts import ChatPromptTemplate
+# # from langchain_core.tools import BaseTool
+# # from langchain_core.callbacks import CallbackManagerForToolRun
+# # from langchain_core.pydantic_v1 import BaseModel, Field
+# # from langchain_core.messages import HumanMessage
+
+# # try:
+# #     from langchain_openai import ChatOpenAI
+# # except ImportError:
+# #     try:
+# #         from langchain_community.chat_models import ChatOpenAI
+# #     except ImportError:
+# #         from langchain.chat_models import ChatOpenAI
+
+# # import requests
+
+# # # For direct LM Studio API calls
+# # try:
+# #     import aiohttp
+# # except ImportError:
+# #     print("Warning: aiohttp not installed. Direct API calls will not work.")
+# #     print("Install with: pip install aiohttp")
+# #     aiohttp = None
+
+# # # Configure logging
+# # logging.basicConfig(level=logging.INFO)
+# # logger = logging.getLogger(__name__)
+
+# # class MCPToolInput(BaseModel):
+# #     """Dynamic input schema for MCP tools"""
+# #     pass
+
+# # class MCPTool(BaseTool):
+# #     """Enhanced MCP tool with proper image handling for vision models"""
+
+# #     mcp_client: Any = None
+
+# #     def __init__(self, tool_name: str, tool_description: str, mcp_client: 'MCPClient', input_schema: Optional[Dict] = None):
+# #         # Create dynamic input model if schema is provided
+# #         args_schema = None
+
+# #         if input_schema and input_schema.get("properties"):
+# #             properties = input_schema.get("properties", {})
+# #             required = input_schema.get("required", [])
+
+# #             annotations = {}
+# #             field_info = {}
+
+# #             for prop_name, prop_info in properties.items():
+# #                 if prop_info.get("type") == "integer":
+# #                     field_type = int
+# #                 elif prop_info.get("type") == "boolean":
+# #                     field_type = bool
+# #                 elif prop_info.get("type") == "array":
+# #                     field_type = List[str]
+# #                 else:
+# #                     field_type = str
+
+# #                 if prop_name in required:
+# #                     annotations[prop_name] = field_type
+# #                     field_info[prop_name] = Field(description=prop_info.get("description", ""))
+# #                 else:
+# #                     annotations[prop_name] = Optional[field_type]
+# #                     field_info[prop_name] = Field(default=None, description=prop_info.get("description", ""))
+
+# #             if annotations:
+# #                 DynamicInput = type(
+# #                     f"{tool_name}Input",
+# #                     (BaseModel,),
+# #                     {
+# #                         "__annotations__": annotations,
+# #                         **field_info
+# #                     }
+# #                 )
+# #                 args_schema = DynamicInput
+
+# #         super().__init__(
+# #             name=tool_name,
+# #             description=tool_description,
+# #             args_schema=args_schema
+# #         )
+# #         self.mcp_client = mcp_client
+
+# #     def _run(self, **kwargs) -> str:
+# #         """Run the tool synchronously"""
+# #         return asyncio.run(self._arun(**kwargs))
+
+# #     async def _arun(self, **kwargs) -> str:
+# #         """Enhanced async tool execution with proper image handling"""
+# #         try:
+# #             filtered_kwargs = {k: v for k, v in kwargs.items() if v is not None}
+# #             result = await self.mcp_client.call_tool(self.name, filtered_kwargs)
+
+# #             if isinstance(result, dict) and "content" in result:
+# #                 return await self._process_mcp_response(result["content"])
+
+# #             return json.dumps(result, indent=2) if isinstance(result, dict) else str(result)
+
+# #         except Exception as e:
+# #             logger.error(f"Error calling {self.name}: {e}")
+# #             return f"Error calling {self.name}: {str(e)}"
+
+# #     async def _process_mcp_response(self, content_items: List[Dict]) -> str:
+# #         """Process MCP response content, handling both text and images"""
+# #         if not isinstance(content_items, list):
+# #             return str(content_items)
+
+# #         text_parts = []
+# #         images = []
+
+# #         for item in content_items:
+# #             if item.get("type") == "text":
+# #                 text_parts.append(item.get("text", ""))
+# #             elif item.get("type") == "image":
+# #                 image_info = await self._process_image_content(item)
+# #                 if image_info:
+# #                     images.append(image_info)
+# #                     text_parts.append(f"[SCREENSHOT CAPTURED: {image_info.get('description', 'Image')}]")
+
+# #         # Store images for potential model analysis
+# #         if images:
+# #             self.mcp_client.store_images(images)
+# #             logger.info(f"Stored {len(images)} images for analysis")
+
+# #         text_result = "\n".join(text_parts) if text_parts else "Operation completed"
+
+# #         # For screenshot tools, try immediate analysis
+# #         if images and "screenshot" in self.name.lower():
+# #             logger.info("Screenshot tool detected, attempting analysis...")
+# #             try:
+# #                 analysis = await self.mcp_client.analyze_last_screenshot()
+# #                 if analysis and "not working properly" not in analysis and "doesn't support vision" not in analysis:
+# #                     text_result += f"\n\n🔍 Screenshot Analysis:\n{analysis}"
+# #                 else:
+# #                     text_result += f"\n\n📸 Screenshot saved for reference"
+# #                     if analysis:
+# #                         text_result += f"\nNote: {analysis}"
+# #             except Exception as e:
+# #                 logger.error(f"Screenshot analysis failed: {e}")
+# #                 text_result += f"\n\n📸 Screenshot saved but analysis failed: {str(e)}"
+
+# #         if images and "screenshot" not in self.name.lower():
+# #             text_result += f"\n\n📸 {len(images)} image(s) captured and available for analysis"
+
+# #         return text_result
+
+# #     async def _process_image_content(self, image_item: Dict) -> Optional[Dict]:
+# #         """Process image content from MCP response"""
+# #         try:
+# #             image_data = image_item.get("data", "")
+# #             mime_type = image_item.get("mimeType", "image/png")
+
+# #             if not image_data:
+# #                 return None
+
+# #             # Handle base64 data URLs
+# #             if image_data.startswith("data:"):
+# #                 # Extract base64 part from data URL
+# #                 base64_data = image_data.split(",", 1)[1] if "," in image_data else image_data
+# #             else:
+# #                 base64_data = image_data
+
+# #             return {
+# #                 "type": "image",
+# #                 "base64": base64_data,
+# #                 "mime_type": mime_type,
+# #                 "description": f"Screenshot ({mime_type})",
+# #                 "size_info": f"Base64 length: {len(base64_data)}"
+# #             }
+
+# #         except Exception as e:
+# #             logger.error(f"Error processing image: {e}")
+# #             return None
+
+# # class MCPClient:
+# #     """Enhanced MCP Client with image storage and analysis capabilities"""
+
+# #     def __init__(self, server_command: List[str]):
+# #         self.server_command = server_command
+# #         self.process = None
+# #         self.tools_info = {}
+# #         self.request_id = 0
+# #         self.stored_images = []  # Store images for analysis
+# #         self.llm = None  # Will be set by the agent
+
+# #     def store_images(self, images: List[Dict]):
+# #         """Store images for later analysis"""
+# #         self.stored_images.extend(images)
+# #         # Keep only the last 5 images to avoid memory issues
+# #         if len(self.stored_images) > 5:
+# #             self.stored_images = self.stored_images[-5:]
+
+# #     async def debug_last_image(self) -> Optional[str]:
+# #         """Comprehensive debug information about the last captured image"""
+# #         if not self.stored_images:
+# #             return "No images stored"
+
+# #         latest_image = self.stored_images[-1]
+
+# #         # Check if base64 is valid
+# #         try:
+# #             base64_bytes = base64.b64decode(latest_image['base64'])
+# #             is_valid_base64 = True
+# #             decoded_size = len(base64_bytes)
+# #         except Exception as e:
+# #             is_valid_base64 = False
+# #             decoded_size = 0
+
+# #         # Check image format
+# #         image_format = "Unknown"
+# #         if latest_image['base64'].startswith('/9j/'):
+# #             image_format = "JPEG"
+# #         elif latest_image['base64'].startswith('iVBORw0KGgo'):
+# #             image_format = "PNG"
+# #         elif latest_image['base64'].startswith('UklGR'):
+# #             image_format = "WebP"
+
+# #         debug_info = f"""
+# # 🔍 Image Debug Info:
+# # - Storage: {'✅ Image stored' if latest_image else '❌ No image'}
+# # - Type: {latest_image['type']}
+# # - MIME Type: {latest_image['mime_type']}
+# # - Description: {latest_image['description']}
+# # - Base64 Length: {len(latest_image['base64'])} characters
+# # - Base64 Preview (first 100 chars): {latest_image['base64'][:100]}...
+# # - Base64 Preview (last 50 chars): ...{latest_image['base64'][-50:]}
+# # - Valid Base64: {'✅ Yes' if is_valid_base64 else '❌ No'}
+# # - Decoded Size: {decoded_size} bytes ({decoded_size/1024:.1f} KB)
+# # - Detected Format: {image_format}
+# # - Data URL Format: data:{latest_image['mime_type']};base64,[{len(latest_image['base64'])} chars]
+# # """
+# #         return debug_info
+
+# #     async def test_lm_studio_vision(self) -> str:
+# #         """Test LM Studio's vision capabilities - optimized for Qwen 2.5-VL"""
+# #         try:
+# #             if not aiohttp:
+# #                 return "❌ aiohttp not installed. Run: pip install aiohttp"
+
+# #             base_url = getattr(self.llm, 'base_url', 'http://localhost:1234/v1')
+# #             if hasattr(self.llm, 'openai_api_base'):
+# #                 base_url = self.llm.openai_api_base
+
+# #             api_url = f"{base_url.rstrip('/')}/chat/completions"
+
+# #             # Test 1: Basic connection
+# #             test_payload = {
+# #                 "model": "qwen2.5-vl-7b",  # Use specific model name
+# #                 "messages": [{"role": "user", "content": "Hello! You are Qwen2.5-VL. Can you see and analyze images?"}],
+# #                 "max_tokens": 100
+# #             }
+
+# #             async with aiohttp.ClientSession() as session:
+# #                 # Test basic connection
+# #                 try:
+# #                     async with session.post(
+# #                         api_url,
+# #                         json=test_payload,
+# #                         headers={"Content-Type": "application/json"},
+# #                         timeout=aiohttp.ClientTimeout(total=15)
+# #                     ) as resp:
+# #                         if resp.status != 200:
+# #                             error_text = await resp.text()
+# #                             return f"❌ Basic connection failed: {resp.status} - {error_text}"
+
+# #                         result = await resp.json()
+# #                         basic_response = result.get("choices", [{}])[0].get("message", {}).get("content", "No response")
+
+# #                 except Exception as e:
+# #                     return f"❌ Connection error: {str(e)}"
+
+# #                 # Test 2: Try with Qwen 2.5-VL optimized test image (small red square)
+# #                 test_image_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+
+# #                 # Format 1: Standard multimodal format
+# #                 vision_payload_1 = {
+# #                     "model": "qwen2.5-vl-7b",
+# #                     "messages": [
+# #                         {
+# #                             "role": "user",
+# #                             "content": [
+# #                                 {
+# #                                     "type": "image_url",
+# #                                     "image_url": {
+# #                                         "url": f"data:image/png;base64,{test_image_b64}"
+# #                                     }
+# #                                 },
+# #                                 {
+# #                                     "type": "text",
+# #                                     "text": "What color is this image? Just say the color."
+# #                                 }
+# #                             ]
+# #                         }
+# #                     ],
+# #                     "temperature": 0.1,
+# #                     "max_tokens": 50
+# #                 }
+
+# #                 vision_response_1 = None
+# #                 vision_status_1 = None
+
+# #                 try:
+# #                     async with session.post(
+# #                         api_url,
+# #                         json=vision_payload_1,
+# #                         headers={"Content-Type": "application/json"},
+# #                         timeout=aiohttp.ClientTimeout(total=45)  # Qwen can be slow
+# #                     ) as resp:
+# #                         vision_status_1 = resp.status
+# #                         if resp.status == 200:
+# #                             result = await resp.json()
+# #                             vision_response_1 = result.get("choices", [{}])[0].get("message", {}).get("content", "No response")
+# #                         else:
+# #                             vision_response_1 = await resp.text()
+
+# #                 except Exception as e:
+# #                     vision_response_1 = f"Error: {str(e)}"
+# #                     vision_status_1 = "Exception"
+
+# #                 # Test 3: Try alternative Qwen format
+# #                 vision_payload_2 = {
+# #                     "model": "current",
+# #                     "messages": [
+# #                         {
+# #                             "role": "user",
+# #                             "content": f"<image>data:image/png;base64,{test_image_b64}</image>\n\nDescribe this image briefly."
+# #                         }
+# #                     ],
+# #                     "temperature": 0.1,
+# #                     "max_tokens": 50
+# #                 }
+
+# #                 vision_response_2 = None
+# #                 vision_status_2 = None
+
+# #                 try:
+# #                     async with session.post(
+# #                         api_url,
+# #                         json=vision_payload_2,
+# #                         headers={"Content-Type": "application/json"},
+# #                         timeout=aiohttp.ClientTimeout(total=45)
+# #                     ) as resp:
+# #                         vision_status_2 = resp.status
+# #                         if resp.status == 200:
+# #                             result = await resp.json()
+# #                             vision_response_2 = result.get("choices", [{}])[0].get("message", {}).get("content", "No response")
+# #                         else:
+# #                             vision_response_2 = await resp.text()
+
+# #                 except Exception as e:
+# #                     vision_response_2 = f"Error: {str(e)}"
+# #                     vision_status_2 = "Exception"
+
+# #             # Analyze results
+# #             format1_works = (vision_status_1 == 200 and
+# #                            vision_response_1 and
+# #                            ('red' in vision_response_1.lower() or 'color' in vision_response_1.lower()))
+
+# #             format2_works = (vision_status_2 == 200 and
+# #                            vision_response_2 and
+# #                            ('red' in vision_response_2.lower() or 'color' in vision_response_2.lower()))
+
+# #             status = "✅ Working" if (format1_works or format2_works) else "❌ Not Working"
+
+# #             return f"""
+# # 🧪 Qwen 2.5-VL Test Results:
+# # - API URL: {api_url}
+# # - Basic Connection: ✅ Success (Status 200)
+# # - Basic Response: "{basic_response[:150]}..."
+
+# # 📊 Vision Tests:
+# # - Format 1 (Standard): {'✅' if vision_status_1 == 200 else '❌'} {vision_status_1}
+# #   Response: "{(vision_response_1 or '')[:100]}..."
+
+# # - Format 2 (Alternative): {'✅' if vision_status_2 == 200 else '❌'} {vision_status_2}
+# #   Response: "{(vision_response_2 or '')[:100]}..."
+
+# # 🎯 Overall Vision Status: {status}
+# # {'✅ Qwen 2.5-VL vision is working!' if (format1_works or format2_works) else '❌ Vision may not be properly configured'}
+
+# # Recommended: Use Format {'1' if format1_works else '2' if format2_works else '1 (if you fix the setup)'}
+# # """
+
+# #         except Exception as e:
+# #             return f"❌ Test failed with error: {str(e)}"
+
+# #     async def analyze_last_screenshot(self) -> Optional[str]:
+# #         """Analyze the last screenshot using LM Studio's vision format - optimized for Qwen 2.5-VL"""
+# #         if not self.stored_images or not self.llm:
+# #             return None
+
+# #         try:
+# #             latest_image = self.stored_images[-1]
+# #             logger.info(f"Attempting to analyze image with Qwen 2.5-VL: {latest_image['description']}")
+
+# #             # Qwen 2.5-VL specific format attempts
+
+# #             # Approach 1: Qwen 2.5-VL prefers simple message format
+# #             try:
+# #                 messages = [
+# #                     {
+# #                         "role": "user",
+# #                         "content": [
+# #                             {
+# #                                 "type": "image_url",
+# #                                 "image_url": {
+# #                                     "url": f"data:{latest_image['mime_type']};base64,{latest_image['base64']}"
+# #                                 }
+# #                             },
+# #                             {
+# #                                 "type": "text",
+# #                                 "text": "Describe this screenshot in detail. What do you see on this webpage? Include layout, text content, buttons, forms, and any interactive elements."
+# #                             }
+# #                         ]
+# #                     }
+# #                 ]
+
+# #                 response = await self.llm.ainvoke(messages)
+
+# #                 if (response.content and
+# #                     "I would need to see it directly" not in response.content and
+# #                     "cannot see" not in response.content.lower() and
+# #                     len(response.content.strip()) > 50):
+# #                     logger.info("Qwen 2.5-VL analysis successful via LangChain!")
+# #                     return response.content
+
+# #             except Exception as e1:
+# #                 logger.debug(f"Qwen 2.5-VL LangChain format failed: {e1}")
+
+# #             # Approach 2: Direct API call with Qwen-optimized format
+# #             try:
+# #                 if not aiohttp:
+# #                     raise Exception("aiohttp not available")
+
+# #                 # Qwen 2.5-VL API format
+# #                 payload = {
+# #                     "model": "qwen2.5-vl-7b",  # Specific model name
+# #                     "messages": [
+# #                         {
+# #                             "role": "user",
+# #                             "content": [
+# #                                 {
+# #                                     "type": "image_url",
+# #                                     "image_url": {
+# #                                         "url": f"data:{latest_image['mime_type']};base64,{latest_image['base64']}"
+# #                                     }
+# #                                 },
+# #                                 {
+# #                                     "type": "text",
+# #                                     "text": "Analyze this screenshot. Describe the webpage layout, visible text, buttons, forms, navigation elements, and overall content. Be specific and detailed."
+# #                                 }
+# #                             ]
+# #                         }
+# #                     ],
+# #                     "temperature": 0.1,
+# #                     "max_tokens": 2000,
+# #                     "stream": False
+# #                 }
+
+# #                 # Get the base URL properly
+# #                 base_url = getattr(self.llm, 'base_url', 'http://localhost:1234/v1')
+# #                 if hasattr(self.llm, 'openai_api_base'):
+# #                     base_url = self.llm.openai_api_base
+
+# #                 api_url = f"{base_url.rstrip('/')}/chat/completions"
+# #                 logger.info(f"Trying Qwen 2.5-VL direct API call to: {api_url}")
+
+# #                 async with aiohttp.ClientSession() as session:
+# #                     async with session.post(
+# #                         api_url,
+# #                         json=payload,
+# #                         headers={"Content-Type": "application/json"},
+# #                         timeout=aiohttp.ClientTimeout(total=90)  # Qwen can be slower
+# #                     ) as resp:
+# #                         if resp.status == 200:
+# #                             result = await resp.json()
+# #                             if result.get("choices") and result["choices"][0].get("message"):
+# #                                 content = result["choices"][0]["message"]["content"]
+# #                                 if (content and
+# #                                     "I would need to see it directly" not in content and
+# #                                     "cannot see" not in content.lower() and
+# #                                     len(content.strip()) > 50):
+# #                                     logger.info("Qwen 2.5-VL direct API call successful!")
+# #                                     return content
+# #                         else:
+# #                             error_text = await resp.text()
+# #                             logger.error(f"Qwen 2.5-VL API call failed: {resp.status} - {error_text}")
+
+# #             except Exception as e2:
+# #                 logger.debug(f"Qwen 2.5-VL direct API approach failed: {e2}")
+
+# #             # Approach 3: Try alternative message structure
+# #             try:
+# #                 if aiohttp:
+# #                     # Some versions of Qwen prefer text first
+# #                     alt_payload = {
+# #                         "model": "current",
+# #                         "messages": [
+# #                             {
+# #                                 "role": "user",
+# #                                 "content": f"<image>data:{latest_image['mime_type']};base64,{latest_image['base64']}</image>\n\nPlease analyze this screenshot and describe what you see. Include details about the webpage layout, text content, interactive elements, and overall design."
+# #                             }
+# #                         ],
+# #                         "temperature": 0.1,
+# #                         "max_tokens": 2000
+# #                     }
+
+# #                     api_url = f"{base_url.rstrip('/')}/chat/completions"
+
+# #                     async with aiohttp.ClientSession() as session:
+# #                         async with session.post(
+# #                             api_url,
+# #                             json=alt_payload,
+# #                             headers={"Content-Type": "application/json"},
+# #                             timeout=aiohttp.ClientTimeout(total=90)
+# #                         ) as resp:
+# #                             if resp.status == 200:
+# #                                 result = await resp.json()
+# #                                 if result.get("choices") and result["choices"][0].get("message"):
+# #                                     content = result["choices"][0]["message"]["content"]
+# #                                     if (content and
+# #                                         "I would need to see it directly" not in content and
+# #                                         "cannot see" not in content.lower() and
+# #                                         len(content.strip()) > 50):
+# #                                         logger.info("Qwen 2.5-VL alternative format successful!")
+# #                                         return content
+
+# #             except Exception as e3:
+# #                 logger.debug(f"Qwen 2.5-VL alternative format failed: {e3}")
+
+# #             # Test basic vision capability
+# #             try:
+# #                 test_prompt = "Are you a vision-language model? Can you analyze images? Please answer YES or NO."
+# #                 test_response = await self.llm.ainvoke(test_prompt)
+
+# #                 if ("NO" in test_response.content.upper() or
+# #                     "cannot" in test_response.content.lower() or
+# #                     "do not" in test_response.content.lower()):
+# #                     return "Screenshot captured but Qwen 2.5-VL model reports it cannot see images. Check that the vision model is properly loaded in LM Studio."
+
+# #             except Exception as e4:
+# #                 logger.debug(f"Qwen 2.5-VL vision capability test failed: {e4}")
+
+# #             return f"""Screenshot captured ({latest_image['size_info']}) but Qwen 2.5-VL cannot process the image.
+
+# # Possible issues:
+# # 1. Make sure 'qwen/qwen2.5-vl-7b' is fully loaded in LM Studio
+# # 2. Check that LM Studio shows 'Vision' capability for this model
+# # 3. Verify the model has enough VRAM allocated
+# # 4. Try reloading the model in LM Studio
+
+# # Image info: {latest_image['mime_type']}, {len(latest_image['base64'])} characters base64"""
+
+# #         except Exception as e:
+# #             logger.error(f"Error analyzing screenshot with Qwen 2.5-VL: {e}")
+# #             return f"Screenshot captured but analysis failed: {str(e)}"
+
+# #     async def start(self):
+# #         """Start the MCP server process with enhanced buffer handling"""
+# #         try:
+# #             self.process = await asyncio.create_subprocess_exec(
+# #                 *self.server_command,
+# #                 stdin=asyncio.subprocess.PIPE,
+# #                 stdout=asyncio.subprocess.PIPE,
+# #                 stderr=asyncio.subprocess.PIPE,
+# #                 limit=1024*1024*50  # 50MB buffer for large images
+# #             )
+
+# #             await asyncio.sleep(2)
+
+# #             # Initialize MCP protocol
+# #             init_response = await self._send_request("initialize", {
+# #                 "protocolVersion": "2024-11-05",
+# #                 "capabilities": {
+# #                     "roots": {"listChanged": True},
+# #                     "sampling": {}
+# #                 },
+# #                 "clientInfo": {
+# #                     "name": "langchain-mcp-client",
+# #                     "version": "1.0.0"
+# #                 }
+# #             })
+
+# #             logger.info(f"MCP Server initialized: {init_response}")
+
+# #             await self._send_notification("notifications/initialized")
+
+# #             # List available tools
+# #             tools_response = await self._send_request("tools/list", {})
+# #             if "tools" in tools_response:
+# #                 for tool in tools_response["tools"]:
+# #                     self.tools_info[tool["name"]] = tool
+
+# #             logger.info(f"Connected to MCP server. Available tools: {list(self.tools_info.keys())}")
+
+# #         except Exception as e:
+# #             logger.error(f"Failed to start MCP server: {e}")
+# #             if self.process and self.process.stderr:
+# #                 try:
+# #                     stderr_output = await asyncio.wait_for(self.process.stderr.read(1024), timeout=1)
+# #                     if stderr_output:
+# #                         logger.error(f"Server stderr: {stderr_output.decode()}")
+# #                 except asyncio.TimeoutError:
+# #                     logger.error("Could not read stderr from server")
+# #             raise
+
+# #     async def stop(self):
+# #         """Stop the MCP server process"""
+# #         if self.process:
+# #             try:
+# #                 self.process.terminate()
+# #                 await asyncio.wait_for(self.process.wait(), timeout=5)
+# #             except asyncio.TimeoutError:
+# #                 self.process.kill()
+# #                 await self.process.wait()
+
+# #     def _get_next_id(self) -> int:
+# #         """Get next request ID"""
+# #         self.request_id += 1
+# #         return self.request_id
+
+# #     async def _send_request(self, method: str, params: Optional[Dict] = None) -> Dict:
+# #         """Send request with enhanced chunked response handling for large images"""
+# #         if not self.process:
+# #             raise Exception("MCP server not started")
+
+# #         request = {
+# #             "jsonrpc": "2.0",
+# #             "id": self._get_next_id(),
+# #             "method": method,
+# #             "params": params or {}
+# #         }
+
+# #         request_json = json.dumps(request) + "\n"
+# #         logger.debug(f"Sending request: {request_json.strip()}")
+
+# #         self.process.stdin.write(request_json.encode())
+# #         await self.process.stdin.drain()
+
+# #         # Enhanced response reading for large images
+# #         try:
+# #             response_buffer = b""
+# #             timeout = 120  # Increased timeout for large screenshots
+# #             chunk_size = 65536  # 64KB chunks
+
+# #             while True:
+# #                 try:
+# #                     chunk = await asyncio.wait_for(
+# #                         self.process.stdout.read(chunk_size),
+# #                         timeout=timeout
+# #                     )
+
+# #                     if not chunk:
+# #                         break
+
+# #                     response_buffer += chunk
+# #                     response_text = response_buffer.decode('utf-8', errors='ignore')
+
+# #                     # Look for complete JSON responses
+# #                     lines = response_text.split('\n')
+# #                     for line in lines[:-1]:
+# #                         line = line.strip()
+# #                         if line:
+# #                             try:
+# #                                 response = json.loads(line)
+# #                                 if "error" in response:
+# #                                     raise Exception(f"MCP Error: {response['error']}")
+# #                                 if "result" in response and response.get("id"):
+# #                                     return response["result"]
+# #                             except json.JSONDecodeError:
+# #                                 continue
+
+# #                     # Keep the last incomplete line
+# #                     if lines:
+# #                         last_line = lines[-1]
+# #                         response_buffer = last_line.encode('utf-8')
+
+# #                 except asyncio.TimeoutError:
+# #                     # Try to parse partial response
+# #                     if response_buffer:
+# #                         try:
+# #                             response_text = response_buffer.decode('utf-8', errors='ignore')
+# #                             response = json.loads(response_text.strip())
+# #                             if "error" in response:
+# #                                 raise Exception(f"MCP Error: {response['error']}")
+# #                             return response.get("result", {})
+# #                         except json.JSONDecodeError:
+# #                             pass
+# #                     raise Exception("MCP server response timeout")
+
+# #         except Exception as e:
+# #             logger.error(f"Error reading response: {e}")
+# #             raise
+
+# #         raise Exception("No valid response received from MCP server")
+
+# #     async def _send_notification(self, method: str, params: Optional[Dict] = None):
+# #         """Send notification to MCP server"""
+# #         if not self.process:
+# #             raise Exception("MCP server not started")
+
+# #         notification = {
+# #             "jsonrpc": "2.0",
+# #             "method": method,
+# #             "params": params or {}
+# #         }
+
+# #         notification_json = json.dumps(notification) + "\n"
+# #         logger.debug(f"Sending notification: {notification_json.strip()}")
+
+# #         self.process.stdin.write(notification_json.encode())
+# #         await self.process.stdin.drain()
+
+# #     async def call_tool(self, tool_name: str, arguments: Dict) -> Any:
+# #         """Call a tool on the MCP server"""
+# #         return await self._send_request("tools/call", {
+# #             "name": tool_name,
+# #             "arguments": arguments
+# #         })
+
+# #     def create_langchain_tools(self) -> List[MCPTool]:
+# #         """Create LangChain tools from MCP tools"""
+# #         langchain_tools = []
+
+# #         for tool_name, tool_info in self.tools_info.items():
+# #             try:
+# #                 tool = MCPTool(
+# #                     tool_name=tool_name,
+# #                     tool_description=tool_info.get("description", f"MCP tool: {tool_name}"),
+# #                     mcp_client=self,
+# #                     input_schema=tool_info.get("inputSchema")
+# #                 )
+# #                 langchain_tools.append(tool)
+# #             except Exception as e:
+# #                 logger.warning(f"Failed to create tool {tool_name}: {e}")
+# #                 continue
+
+# #         return langchain_tools
+
+# # class BrowserAutomationAgent:
+# #     """Enhanced browser automation agent with vision capabilities"""
+
+# #     def __init__(self, lm_studio_url: str = "http://localhost:1234/v1", use_vision: bool = False):
+# #         self.lm_studio_url = lm_studio_url
+# #         self.use_vision = use_vision
+# #         self.mcp_client = None
+# #         self.agent_executor = None
+
+# #     async def setup(self, mcp_server_script_path: str):
+# #         """Setup agent with enhanced vision capabilities"""
+# #         try:
+# #             # Initialize MCP client
+# #             self.mcp_client = MCPClient([
+# #                 "python3", mcp_server_script_path
+# #             ])
+# #             await self.mcp_client.start()
+
+# #             # Create tools
+# #             tools = self.mcp_client.create_langchain_tools()
+# #             if not tools:
+# #                 raise ValueError("No tools were successfully created from MCP server")
+
+# #             logger.info(f"Created {len(tools)} tools from MCP server")
+
+# #             # Setup LM Studio with vision support if requested
+# #             model_name = "gemma-vision" if self.use_vision else "gemma"
+
+# #             llm = ChatOpenAI(
+# #                 base_url=self.lm_studio_url,
+# #                 api_key="not-needed",
+# #                 model=model_name,
+# #                 temperature=0.1,
+# #                 max_tokens=2000
+# #             )
+
+# #             # Store LLM reference in MCP client for image analysis
+# #             self.mcp_client.llm = llm
+
+# #             # Test connection
+# #             try:
+# #                 test_response = await llm.ainvoke("Hello, respond with 'Connection successful'")
+# #                 logger.info(f"LM Studio connection test: {test_response.content}")
+# #             except Exception as e:
+# #                 logger.error(f"LM Studio connection failed: {e}")
+# #                 raise ValueError(f"Cannot connect to LM Studio: {str(e)}")
+
+# #             # Enhanced prompt with vision capabilities
+# #             system_prompt = """You are an advanced browser automation assistant with vision capabilities.
+
+# # Available tools:
+# # - launch_browser: Start a new browser session
+# # - navigate: Go to a specific URL
+# # - take_screenshot: Capture the current page (automatically analyzed) should mandatorily call the moondream tool after capturing the screenshot.
+# # - moondream: Send the captured screenshot image to the moondream tool with the specific element name to get the element's coordinates.
+# # - take_marked_screenshot: Capture with highlighted elements
+# # - get_element_data: Inspect page elements
+# # - click: Click on elements using the coordinates received from the moondream model
+# # - input_text: Type into input fields
+# # - key_press: Press keyboard keys
+# # - scroll: Scroll the page
+# # - wait_for_element: Wait for elements to appear
+# # - get_page_info: Get current page information
+# # - close_browser: Close the browser
+
+# # When working with screenshots:
+# # 1. Screenshots are automatically analyzed when captured
+# # 2. Use the analysis to understand page content and layout
+# # 3. Make decisions based on what you can see in the screenshots
+# # 4. Be specific about elements you want to interact with
+
+# # Best practices:
+# # 1. Always take a screenshot first to see the current state
+# # 2. Use element inspection before clicking or typing
+# # 3. Wait for elements to load when necessary
+# # 4. Provide clear feedback about your actions
+# # 5. Handle errors gracefully and suggest alternatives
+
+# # Be helpful, accurate, and thorough in your browser automation tasks."""
+
+# #             prompt = ChatPromptTemplate.from_messages([
+# #                 ("system", system_prompt),
+# #                 ("human", "{input}"),
+# #                 ("placeholder", "{agent_scratchpad}")
+# #             ])
+
+# #             # Create agent
+# #             agent = create_tool_calling_agent(llm, tools, prompt)
+# #             self.agent_executor = AgentExecutor(
+# #                 agent=agent,
+# #                 tools=tools,
+# #                 verbose=True,
+# #                 max_iterations=10,
+# #                 return_intermediate_steps=True
+# #             )
+
+# #             logger.info("Enhanced browser automation agent setup complete")
+
+# #         except Exception as e:
+# #             logger.error(f"Setup failed: {e}")
+# #             if self.mcp_client:
+# #                 await self.mcp_client.stop()
+# #             raise
+
+# #     async def run(self, query: str) -> str:
+# #         """Run the agent with enhanced error handling"""
+# #         if not self.agent_executor:
+# #             raise ValueError("Agent not setup. Call setup() first.")
+
+# #         try:
+# #             result = await self.agent_executor.ainvoke({"input": query})
+
+# #             # Include image information in response if available
+# #             if self.mcp_client.stored_images:
+# #                 image_count = len(self.mcp_client.stored_images)
+# #                 result["output"] += f"\n\n📸 Session includes {image_count} screenshot(s) for reference."
+
+# #             return result["output"]
+
+# #         except Exception as e:
+# #             logger.error(f"Error running agent: {e}")
+# #             return f"Error: {str(e)}"
+
+# #     async def get_last_screenshot_analysis(self) -> Optional[str]:
+# #         """Get analysis of the last screenshot"""
+# #         if self.mcp_client:
+# #             return await self.mcp_client.analyze_last_screenshot()
+# #         return None
+
+# #     async def test_lm_studio_vision(self) -> str:
+# #         """Test LM Studio's vision capabilities"""
+# #         if self.mcp_client:
+# #             return await self.mcp_client.test_lm_studio_vision()
+# #         return "MCP client not available"
+
+# #     async def save_last_screenshot(self, filename: str = "debug_screenshot.png") -> str:
+# #         """Save the last screenshot to a file"""
+# #         if self.mcp_client:
+# #             return await self.mcp_client.save_last_image_to_file(filename)
+# #         return "MCP client not available"
+
+# #     async def debug_last_screenshot(self) -> Optional[str]:
+# #         """Get debug information about the last screenshot"""
+# #         if self.mcp_client:
+# #             return await self.mcp_client.debug_last_image()
+# #         return None
+
+# #     async def cleanup(self):
+# #         """Cleanup resources"""
+# #         if self.mcp_client:
+# #             await self.mcp_client.stop()
+
+# # # Example usage with vision
+# # async def example_with_vision():
+# #     """Example using vision capabilities"""
+# #     agent = BrowserAutomationAgent(use_vision=True)
+# #     await agent.setup("playwright_mcp_server.py")
+
+# #     try:
+# #         result = await agent.run("""
+# #         1. Launch a browser
+# #         2. Navigate to https://example.com
+# #         3. Take a screenshot and analyze the page
+# #         4. Describe what you see and suggest possible interactions
+# #         """)
+# #         print(result)
+
+# #         # Get additional screenshot analysis
+# #         analysis = await agent.get_last_screenshot_analysis()
+# #         if analysis:
+# #             print(f"\nDetailed Analysis: {analysis}")
+
+# #     finally:
+# #         await agent.cleanup()
+
+# # async def main():
+# #     """Main interactive function"""
+# #     import sys
+
+# #     # Check for vision flag
+# #     use_vision = "--vision" in sys.argv
+
+# #     # Path to your MCP server script
+# #     mcp_server_path = "playwright_mcp_server.py"  # Update this path as needed
+
+# #     # Initialize the agent
+# #     agent = BrowserAutomationAgent(use_vision=use_vision)
+
+# #     try:
+# #         # Setup the agent
+# #         print("🤖 Setting up browser automation agent...")
+# #         if use_vision:
+# #             print("🔍 Vision capabilities enabled")
+# #         await agent.setup(mcp_server_path)
+
+# #         print("🤖 Browser Automation Agent is ready!")
+# #         print("You can ask me to:")
+# #         print("- Navigate to websites")
+# #         print("- Take screenshots")
+# #         print("- Click on elements")
+# #         print("- Fill out forms")
+# #         print("- Extract data from pages")
+# #         if use_vision:
+# #             print("- Analyze screenshots automatically")
+# #         print("- And much more!")
+# #         print("\nSpecial commands:")
+# #         print("- 'debug' - Show debug info about last screenshot")
+# #         print("- 'analyze' - Force analyze last screenshot")
+# #         print("- 'test vision' - Test if vision is working")
+# #         print("- 'test api' - Test LM Studio vision API directly")
+# #         print("- 'save image' - Save last screenshot to file")
+# #         print("\nType 'quit' to exit\n")
+
+# #         # Interactive loop
+# #         while True:
+# #             try:
+# #                 user_input = input("\n👤 What would you like me to do? ")
+
+# #                 if user_input.lower() in ['quit', 'exit', 'q']:
+# #                     break
+
+# #                 if not user_input.strip():
+# #                     continue
+
+# #                 # Handle special debug commands
+# #                 if user_input.lower() == 'debug':
+# #                     debug_info = await agent.debug_last_screenshot()
+# #                     print(f"\n🔧 {debug_info}")
+# #                     continue
+
+# #                 if user_input.lower() == 'analyze':
+# #                     analysis = await agent.get_last_screenshot_analysis()
+# #                     if analysis:
+# #                         print(f"\n🔍 Analysis: {analysis}")
+# #                     else:
+# #                         print("\n❌ No screenshots to analyze")
+# #                     continue
+
+# #                 if user_input.lower() == 'test vision':
+# #                     result = await agent.run("Can you see and process images? Please respond with YES or NO and explain your capabilities.")
+# #                     print(f"\n🧪 Vision Test: {result}")
+# #                     continue
+
+# #                 if user_input.lower() == 'test api':
+# #                     api_test = await agent.test_lm_studio_vision()
+# #                     print(f"\n🔧 API Test Results: {api_test}")
+# #                     continue
+
+# #                 if user_input.lower() == 'save image':
+# #                     save_result = await agent.save_last_screenshot()
+# #                     print(f"\n💾 {save_result}")
+# #                     continue
+
+# #                 print("\n🤖 Working on it...")
+# #                 result = await agent.run(user_input)
+# #                 print(f"\n✅ Result: {result}")
+
+# #                 # Show additional screenshot analysis if available
+# #                 if use_vision:
+# #                     analysis = await agent.get_last_screenshot_analysis()
+# #                     if analysis and "Screenshot captured but" not in analysis:
+# #                         print(f"\n🔍 Additional Analysis: {analysis}")
+
+# #             except KeyboardInterrupt:
+# #                 break
+# #             except Exception as e:
+# #                 print(f"\n❌ Error: {str(e)}")
+
+# #     except Exception as e:
+# #         print(f"❌ Failed to setup agent: {str(e)}")
+# #         print("\nMake sure:")
+# #         print("1. LM Studio is running on localhost:1234")
+# #         print("2. A model is loaded in LM Studio")
+# #         if use_vision:
+# #             print("3. The loaded model supports vision (like LLaVA)")
+# #         print("3. MCP server script path is correct")
+# #         print("4. All required dependencies are installed")
+# #         print("   - pip install langchain langchain-community langchain-openai playwright aiohttp")
+# #         print("   - playwright install")
+# #         if use_vision:
+# #             print("5. Load a VISION model in LM Studio, such as:")
+# #             print("   - qwen2-vl-2b-instruct")
+# #             print("   - llava-v1.6-mistral-7b")
+# #             print("   - minicpm-v-2_6")
+# #             print("   - Make sure the model shows 'Vision' capabilities in LM Studio")
+
+# #     finally:
+# #         # Cleanup
+# #         await agent.cleanup()
+# #         print("\n👋 Goodbye!")
+
+# # if __name__ == "__main__":
+# #     import sys
+
+# #     if len(sys.argv) > 1 and sys.argv[1] == "example":
+# #         # Run example instead of interactive mode
+# #         asyncio.run(example_with_vision())
+# #     else:
+# #         # Run interactive mode
+# #         asyncio.run(main())
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# #!/usr/bin/env python3
+# """
+# Simplified MCP Client for Qwen with image analysis tool integration
+# Supports screenshot analysis and coordinate-based clicking
+# """
+
+# import asyncio
+# import json
+# import logging
+# import base64
+# from typing import Any, Dict, List, Optional
+
+# from langchain.agents import AgentExecutor, create_tool_calling_agent
+# from langchain.prompts import ChatPromptTemplate
+# from langchain_core.tools import BaseTool
+# from langchain_core.pydantic_v1 import BaseModel, Field
+
+# try:
+#     from langchain_openai import ChatOpenAI
+# except ImportError:
+#     try:
+#         from langchain_community.chat_models import ChatOpenAI
+#     except ImportError:
+#         from langchain.chat_models import ChatOpenAI
+
+# # Configure logging
+# logging.basicConfig(level=logging.INFO)
+# logger = logging.getLogger(__name__)
+
+# class MCPToolInput(BaseModel):
+#     """Dynamic input schema for MCP tools"""
+#     pass
+
+# class MCPTool(BaseTool):
+#     """MCP tool with image handling for Qwen"""
+
+#     mcp_client: Any = None
+
+#     def __init__(self, tool_name: str, tool_description: str, mcp_client: 'MCPClient', input_schema: Optional[Dict] = None):
+#         # Create dynamic input model if schema is provided
+#         args_schema = None
+
+#         if input_schema and input_schema.get("properties"):
+#             properties = input_schema.get("properties", {})
+#             required = input_schema.get("required", [])
+
+#             annotations = {}
+#             field_info = {}
+
+#             for prop_name, prop_info in properties.items():
+#                 if prop_info.get("type") == "integer":
+#                     field_type = int
+#                 elif prop_info.get("type") == "boolean":
+#                     field_type = bool
+#                 elif prop_info.get("type") == "array":
+#                     field_type = List[str]
+#                 else:
+#                     field_type = str
+
+#                 if prop_name in required:
+#                     annotations[prop_name] = field_type
+#                     field_info[prop_name] = Field(description=prop_info.get("description", ""))
+#                 else:
+#                     annotations[prop_name] = Optional[field_type]
+#                     field_info[prop_name] = Field(default=None, description=prop_info.get("description", ""))
+
+#             if annotations:
+#                 DynamicInput = type(
+#                     f"{tool_name}Input",
+#                     (BaseModel,),
+#                     {
+#                         "__annotations__": annotations,
+#                         **field_info
+#                     }
+#                 )
+#                 args_schema = DynamicInput
+
+#         super().__init__(
+#             name=tool_name,
+#             description=tool_description,
+#             args_schema=args_schema
+#         )
+#         self.mcp_client = mcp_client
+
+#     def _run(self, **kwargs) -> str:
+#         """Run the tool synchronously"""
+#         return asyncio.run(self._arun(**kwargs))
+
+#     async def _arun(self, **kwargs) -> str:
+#         """Enhanced async tool execution with proper image handling"""
+#         try:
+#             filtered_kwargs = {k: v for k, v in kwargs.items() if v is not None}
+#             result = await self.mcp_client.call_tool(self.name, filtered_kwargs)
+
+#             if isinstance(result, dict) and "content" in result:
+#                 return await self._process_mcp_response(result["content"])
+
+#             return json.dumps(result, indent=2) if isinstance(result, dict) else str(result)
+
+#         except Exception as e:
+#             logger.error(f"Error calling {self.name}: {e}")
+#             return f"Error calling {self.name}: {str(e)}"
+
+#     async def _process_mcp_response(self, content_items: List[Dict]) -> str:
+#         """Process MCP response content, handling both text and images"""
+#         if not isinstance(content_items, list):
+#             return str(content_items)
+
+#         text_parts = []
+#         images = []
+
+#         for item in content_items:
+#             if item.get("type") == "text":
+#                 text_parts.append(item.get("text", ""))
+#             elif item.get("type") == "image":
+#                 image_info = await self._process_image_content(item)
+#                 if image_info:
+#                     images.append(image_info)
+#                     text_parts.append(f"[SCREENSHOT CAPTURED: {image_info.get('description', 'Image')}]")
+
+#         # Store images for analysis
+#         if images:
+#             self.mcp_client.store_images(images)
+#             logger.info(f"Stored {len(images)} images for analysis")
+
+#         return "\n".join(text_parts) if text_parts else "Operation completed"
+
+#     async def _process_image_content(self, image_item: Dict) -> Optional[Dict]:
+#         """Process image content from MCP response"""
+#         try:
+#             image_data = image_item.get("data", "")
+#             mime_type = image_item.get("mimeType", "image/png")
+
+#             if not image_data:
+#                 return None
+
+#             # Handle base64 data URLs
+#             if image_data.startswith("data:"):
+#                 # Extract base64 part from data URL
+#                 base64_data = image_data.split(",", 1)[1] if "," in image_data else image_data
+#             else:
+#                 base64_data = image_data
+
+#             return {
+#                 "type": "image",
+#                 "base64": base64_data,
+#                 "mime_type": mime_type,
+#                 "description": f"Screenshot ({mime_type})",
+#                 "size_info": f"Base64 length: {len(base64_data)}"
+#             }
+
+#         except Exception as e:
+#             logger.error(f"Error processing image: {e}")
+#             return None
+
+# class MCPClient:
+#     """MCP Client with image storage and analysis capabilities"""
+
+#     def __init__(self, server_command: List[str]):
+#         self.server_command = server_command
+#         self.process = None
+#         self.tools_info = {}
+#         self.request_id = 0
+#         self.stored_images = []  # Store images for analysis
+
+#     def store_images(self, images: List[Dict]):
+#         """Store images for later analysis"""
+#         self.stored_images.extend(images)
+#         # Keep only the last 3 images to avoid memory issues
+#         if len(self.stored_images) > 3:
+#             self.stored_images = self.stored_images[-3:]
+
+#     async def get_last_image_base64(self) -> Optional[str]:
+#         """Get the base64 data of the last stored image"""
+#         if not self.stored_images:
+#             return None
+#         return self.stored_images[-1]['base64']
+
+#     async def start(self):
+#         """Start the MCP server process"""
+#         try:
+#             self.process = await asyncio.create_subprocess_exec(
+#                 *self.server_command,
+#                 stdin=asyncio.subprocess.PIPE,
+#                 stdout=asyncio.subprocess.PIPE,
+#                 stderr=asyncio.subprocess.PIPE,
+#                 limit=1024*1024*50  # 50MB buffer for large images
+#             )
+
+#             await asyncio.sleep(2)
+
+#             # Initialize MCP protocol
+#             init_response = await self._send_request("initialize", {
+#                 "protocolVersion": "2024-11-05",
+#                 "capabilities": {
+#                     "roots": {"listChanged": True},
+#                     "sampling": {}
+#                 },
+#                 "clientInfo": {
+#                     "name": "langchain-mcp-client",
+#                     "version": "1.0.0"
+#                 }
+#             })
+
+#             logger.info(f"MCP Server initialized: {init_response}")
+
+#             await self._send_notification("notifications/initialized")
+
+#             # List available tools
+#             tools_response = await self._send_request("tools/list", {})
+#             if "tools" in tools_response:
+#                 for tool in tools_response["tools"]:
+#                     self.tools_info[tool["name"]] = tool
+
+#             logger.info(f"Connected to MCP server. Available tools: {list(self.tools_info.keys())}")
+
+#         except Exception as e:
+#             logger.error(f"Failed to start MCP server: {e}")
+#             raise
+
+#     async def stop(self):
+#         """Stop the MCP server process"""
+#         if self.process:
+#             try:
+#                 self.process.terminate()
+#                 await asyncio.wait_for(self.process.wait(), timeout=5)
+#             except asyncio.TimeoutError:
+#                 self.process.kill()
+#                 await self.process.wait()
+
+#     def _get_next_id(self) -> int:
+#         """Get next request ID"""
+#         self.request_id += 1
+#         return self.request_id
+
+#     async def _send_request(self, method: str, params: Optional[Dict] = None) -> Dict:
+#         """Send request with enhanced chunked response handling for large images"""
+#         if not self.process:
+#             raise Exception("MCP server not started")
+
+#         request = {
+#             "jsonrpc": "2.0",
+#             "id": self._get_next_id(),
+#             "method": method,
+#             "params": params or {}
+#         }
+
+#         request_json = json.dumps(request) + "\n"
+#         logger.debug(f"Sending request: {request_json.strip()}")
+
+#         self.process.stdin.write(request_json.encode())
+#         await self.process.stdin.drain()
+
+#         # Enhanced response reading for large images
+#         try:
+#             response_buffer = b""
+#             timeout = 120  # Increased timeout for large screenshots
+#             chunk_size = 65536  # 64KB chunks
+
+#             while True:
+#                 try:
+#                     chunk = await asyncio.wait_for(
+#                         self.process.stdout.read(chunk_size),
+#                         timeout=timeout
+#                     )
+
+#                     if not chunk:
+#                         break
+
+#                     response_buffer += chunk
+#                     response_text = response_buffer.decode('utf-8', errors='ignore')
+
+#                     # Look for complete JSON responses
+#                     lines = response_text.split('\n')
+#                     for line in lines[:-1]:
+#                         line = line.strip()
+#                         if line:
+#                             try:
+#                                 response = json.loads(line)
+#                                 if "error" in response:
+#                                     raise Exception(f"MCP Error: {response['error']}")
+#                                 if "result" in response and response.get("id"):
+#                                     return response["result"]
+#                             except json.JSONDecodeError:
+#                                 continue
+
+#                     # Keep the last incomplete line
+#                     if lines:
+#                         last_line = lines[-1]
+#                         response_buffer = last_line.encode('utf-8')
+
+#                 except asyncio.TimeoutError:
+#                     raise Exception("MCP server response timeout")
+
+#         except Exception as e:
+#             logger.error(f"Error reading response: {e}")
+#             raise
+
+#         raise Exception("No valid response received from MCP server")
+
+#     async def _send_notification(self, method: str, params: Optional[Dict] = None):
+#         """Send notification to MCP server"""
+#         if not self.process:
+#             raise Exception("MCP server not started")
+
+#         notification = {
+#             "jsonrpc": "2.0",
+#             "method": method,
+#             "params": params or {}
+#         }
+
+#         notification_json = json.dumps(notification) + "\n"
+#         logger.debug(f"Sending notification: {notification_json.strip()}")
+
+#         self.process.stdin.write(notification_json.encode())
+#         await self.process.stdin.drain()
+
+#     async def call_tool(self, tool_name: str, arguments: Dict) -> Any:
+#         """Call a tool on the MCP server"""
+#         return await self._send_request("tools/call", {
+#             "name": tool_name,
+#             "arguments": arguments
+#         })
+
+#     def create_langchain_tools(self) -> List[MCPTool]:
+#         """Create LangChain tools from MCP tools"""
+#         langchain_tools = []
+
+#         for tool_name, tool_info in self.tools_info.items():
+#             try:
+#                 tool = MCPTool(
+#                     tool_name=tool_name,
+#                     tool_description=tool_info.get("description", f"MCP tool: {tool_name}"),
+#                     mcp_client=self,
+#                     input_schema=tool_info.get("inputSchema")
+#                 )
+#                 langchain_tools.append(tool)
+#             except Exception as e:
+#                 logger.warning(f"Failed to create tool {tool_name}: {e}")
+#                 continue
+
+#         return langchain_tools
+
+# class BrowserAutomationAgent:
+#     """Browser automation agent with Qwen and image analysis"""
+
+#     def __init__(self, lm_studio_url: str = "http://localhost:1234/v1"):
+#         self.lm_studio_url = lm_studio_url
+#         self.mcp_client = None
+#         self.agent_executor = None
+
+#     async def setup(self, mcp_server_script_path: str):
+#         """Setup agent with Qwen"""
+#         try:
+#             # Initialize MCP client
+#             self.mcp_client = MCPClient([
+#                 "python3", mcp_server_script_path
+#             ])
+#             await self.mcp_client.start()
+
+#             # Create tools
+#             tools = self.mcp_client.create_langchain_tools()
+#             if not tools:
+#                 raise ValueError("No tools were successfully created from MCP server")
+
+#             logger.info(f"Created {len(tools)} tools from MCP server")
+
+#             # Setup Qwen model
+#             llm = ChatOpenAI(
+#                 base_url=self.lm_studio_url,
+#                 api_key="not-needed",
+#                 model="qwen2.5-vl-7b",  # Qwen vision model
+#                 temperature=0.1,
+#                 max_tokens=2000
+#             )
+
+#             # Test connection
+#             try:
+#                 test_response = await llm.ainvoke("Hello, respond with 'Connection successful'")
+#                 logger.info(f"Qwen connection test: {test_response.content}")
+#             except Exception as e:
+#                 logger.error(f"Qwen connection failed: {e}")
+#                 raise ValueError(f"Cannot connect to Qwen: {str(e)}")
+
+#             # Enhanced prompt for Qwen with image analysis workflow
+#             system_prompt = """You are an advanced browser automation assistant using Qwen with vision capabilities.
+
+# WORKFLOW FOR INTERACTIVE TASKS:
+# 1. Take a screenshot to see the current page
+# 2. Use analyze_image_for_element tool to find specific elements by describing them
+# 3. Use the coordinates returned to click or interact with elements
+# 4. Always verify actions by taking another screenshot
+
+# Available tools:
+# - launch_browser: Start browser session
+# - navigate: Go to a URL
+# - take_screenshot: Capture current page (returns image data)
+# - analyze_image_for_element: Send image + element description, get coordinates back
+# - click_at_coordinates: Click at specific x,y coordinates
+# - input_text: Type into input fields using selector
+# - key_press: Press keyboard keys
+# - scroll: Scroll the page
+# - wait_for_element: Wait for elements
+# - close_browser: Close browser
+
+# CRITICAL PROCESS:
+# 1. When you need to click something, ALWAYS:
+#    - Take screenshot first
+#    - Call analyze_image_for_element with the screenshot and element description
+#    - Use returned coordinates with click_at_coordinates
+
+# 2. For text input:
+#    - Take screenshot
+#    - Use analyze_image_for_element to find the input field
+#    - Use coordinates as needed if after trying with coordinates for3 times and still failure go for selectors.
+
+# Example workflow:
+# 1. take_screenshot()
+# 2. analyze_image_for_element(image_base64=<screenshot>, element_name="login button")
+# 3. click_at_coordinates(x=returned_x, y=returned_y)
+
+# Be precise in describing elements to the image analysis tool. Use clear descriptions like:
+# - "red login button in top right"
+# - "username input field"
+# - "search box with magnifying glass icon"
+# - "blue submit button at bottom"
+
+# Always use coordinates returned by the analysis tool for clicking."""
+
+#             prompt = ChatPromptTemplate.from_messages([
+#                 ("system", system_prompt),
+#                 ("human", "{input}"),
+#                 ("placeholder", "{agent_scratchpad}")
+#             ])
+
+#             # Create agent
+#             agent = create_tool_calling_agent(llm, tools, prompt)
+#             self.agent_executor = AgentExecutor(
+#                 agent=agent,
+#                 tools=tools,
+#                 verbose=True,
+#                 max_iterations=15,
+#                 return_intermediate_steps=True
+#             )
+
+#             logger.info("Qwen browser automation agent setup complete")
+
+#         except Exception as e:
+#             logger.error(f"Setup failed: {e}")
+#             if self.mcp_client:
+#                 await self.mcp_client.stop()
+#             raise
+
+#     async def run(self, query: str) -> str:
+#         """Run the agent"""
+#         if not self.agent_executor:
+#             raise ValueError("Agent not setup. Call setup() first.")
+
+#         try:
+#             result = await self.agent_executor.ainvoke({"input": query})
+#             return result["output"]
+
+#         except Exception as e:
+#             logger.error(f"Error running agent: {e}")
+#             return f"Error: {str(e)}"
+
+#     async def get_last_screenshot_base64(self) -> Optional[str]:
+#         """Get the last screenshot as base64 for debugging"""
+#         if self.mcp_client:
+#             return await self.mcp_client.get_last_image_base64()
+#         return None
+
+#     async def cleanup(self):
+#         """Cleanup resources"""
+#         if self.mcp_client:
+#             await self.mcp_client.stop()
+
+# async def main():
+#     """Main interactive function"""
+#     import sys
+
+#     # Path to your MCP server script
+#     mcp_server_path = "playwright_mcp_server.py"  # Update this path as needed
+
+#     # Initialize the agent
+#     agent = BrowserAutomationAgent()
+
+#     try:
+#         # Setup the agent
+#         print("🤖 Setting up Qwen browser automation agent...")
+#         await agent.setup(mcp_server_path)
+
+#         print("🤖 Qwen Browser Automation Agent is ready!")
+#         print("This agent uses image analysis to find and click elements.")
+#         print("\nYou can ask me to:")
+#         print("- Navigate to websites and interact with elements")
+#         print("- Take screenshots and analyze them")
+#         print("- Click on buttons, links, and other elements")
+#         print("- Fill out forms and input text")
+#         print("- Extract data from pages")
+#         print("\nThe agent will automatically:")
+#         print("1. Take screenshots to see the page")
+#         print("2. Use image analysis to find elements")
+#         print("3. Click at the exact coordinates found")
+#         print("\nType 'quit' to exit\n")
+
+#         # Interactive loop
+#         while True:
+#             try:
+#                 user_input = input("\n👤 What would you like me to do? ")
+
+#                 if user_input.lower() in ['quit', 'exit', 'q']:
+#                     break
+
+#                 if not user_input.strip():
+#                     continue
+
+#                 print("\n🤖 Working on it...")
+#                 result = await agent.run(user_input)
+#                 print(f"\n✅ Result: {result}")
+
+#             except KeyboardInterrupt:
+#                 break
+#             except Exception as e:
+#                 print(f"\n❌ Error: {str(e)}")
+
+#     except Exception as e:
+#         print(f"❌ Failed to setup agent: {str(e)}")
+#         print("\nMake sure:")
+#         print("1. LM Studio is running on localhost:1234")
+#         print("2. Qwen2.5-VL model is loaded in LM Studio")
+#         print("3. MCP server script path is correct")
+#         print("4. Image analysis service is running on localhost:8000")
+#         print("5. All required dependencies are installed")
+
+#     finally:
+#         # Cleanup
+#         await agent.cleanup()
+#         print("\n👋 Goodbye!")
+
+# if __name__ == "__main__":
+#     asyncio.run(main())
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 #!/usr/bin/env python3
 """
-Enhanced MCP Client with proper image handling for LangChain
-Supports screenshot analysis by converting images to base64 format
+Fixed MCP Client for Qwen with proper base64 image handling
+Resolves the 'Invalid base64 image data' error by properly managing image data flow
 """
 
 import asyncio
 import json
-import subprocess
 import logging
 import base64
-from typing import Any, Dict, List, Optional, Union
-from pathlib import Path
-from io import BytesIO
+import re
+from typing import Any, Dict, List, Optional
 
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain.prompts import ChatPromptTemplate
 from langchain_core.tools import BaseTool
-from langchain_core.callbacks import CallbackManagerForToolRun
 from langchain_core.pydantic_v1 import BaseModel, Field
-from langchain_core.messages import HumanMessage
 
 try:
     from langchain_openai import ChatOpenAI
@@ -27,16 +1659,6 @@ except ImportError:
         from langchain_community.chat_models import ChatOpenAI
     except ImportError:
         from langchain.chat_models import ChatOpenAI
-
-import requests
-
-# For direct LM Studio API calls
-try:
-    import aiohttp
-except ImportError:
-    print("Warning: aiohttp not installed. Direct API calls will not work.")
-    print("Install with: pip install aiohttp")
-    aiohttp = None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -47,7 +1669,7 @@ class MCPToolInput(BaseModel):
     pass
 
 class MCPTool(BaseTool):
-    """Enhanced MCP tool with proper image handling for vision models"""
+    """MCP tool with enhanced base64 image handling"""
 
     mcp_client: Any = None
 
@@ -56,8 +1678,16 @@ class MCPTool(BaseTool):
         args_schema = None
 
         if input_schema and input_schema.get("properties"):
-            properties = input_schema.get("properties", {})
-            required = input_schema.get("required", [])
+            properties = input_schema.get("properties", {}).copy()
+            required = input_schema.get("required", []).copy()
+
+            # Special handling for analyze_image_for_element tool
+            if tool_name == "analyze_image_for_element":
+                # Remove image_base64 from the schema so agent doesn't try to pass it
+                properties.pop('image_base64', None)
+                if 'image_base64' in required:
+                    required.remove('image_base64')
+                logger.info(f"Modified schema for {tool_name}: removed image_base64 parameter")
 
             annotations = {}
             field_info = {}
@@ -90,6 +1720,21 @@ class MCPTool(BaseTool):
                 )
                 args_schema = DynamicInput
 
+        # Update description for analyze_image_for_element
+        if tool_name == "analyze_image_for_element":
+            tool_description = """Analyze the last screenshot to find a specific element and return its coordinates.
+
+            This tool automatically uses the most recent screenshot captured by take_screenshot.
+            You only need to provide the element_name parameter describing what you want to find.
+
+            Args:
+                element_name (str): Clear description of the element to find (e.g., "blue login button", "username input field")
+
+            Returns:
+                JSON with coordinates if found, or error message if not found.
+
+            Important: Take a screenshot first using take_screenshot before calling this tool."""
+
         super().__init__(
             name=tool_name,
             description=tool_description,
@@ -105,6 +1750,11 @@ class MCPTool(BaseTool):
         """Enhanced async tool execution with proper image handling"""
         try:
             filtered_kwargs = {k: v for k, v in kwargs.items() if v is not None}
+
+            # Special handling for analyze_image_for_element tool
+            if self.name == "analyze_image_for_element":
+                return await self._handle_image_analysis(**filtered_kwargs)
+
             result = await self.mcp_client.call_tool(self.name, filtered_kwargs)
 
             if isinstance(result, dict) and "content" in result:
@@ -115,6 +1765,96 @@ class MCPTool(BaseTool):
         except Exception as e:
             logger.error(f"Error calling {self.name}: {e}")
             return f"Error calling {self.name}: {str(e)}"
+
+    async def _handle_image_analysis(self, **kwargs) -> str:
+        """Handle image analysis with proper base64 formatting"""
+        try:
+            element_name = kwargs.get('element_name', 'element')
+
+            logger.info(f"Analyzing image for element: {element_name}")
+
+            # Always get the last screenshot from stored images
+            logger.info("Getting last screenshot from stored images...")
+            image_base64 = await self.mcp_client.get_last_image_base64()
+            if not image_base64:
+                return "No screenshot available. Please take a screenshot first using take_screenshot tool."
+
+            # Clean and validate base64 data
+            logger.info(f"Cleaning base64 data, length: {len(image_base64)}")
+            cleaned_base64 = self._clean_base64_data(image_base64)
+            if not cleaned_base64:
+                debug_info = await self.mcp_client.debug_last_image()
+                return f"Invalid base64 image data.\n\nDebug info:\n{debug_info}\n\nPlease take a new screenshot and try again."
+
+            logger.info(f"Successfully cleaned base64 data, final length: {len(cleaned_base64)}")
+
+            # Prepare arguments for MCP tool call
+            mcp_kwargs = {
+                'image_base64': cleaned_base64,
+                'element_name': element_name
+            }
+
+            # Call the MCP tool with cleaned data
+            result = await self.mcp_client.call_tool(self.name, mcp_kwargs)
+
+            if isinstance(result, dict) and "content" in result:
+                return await self._process_mcp_response(result["content"])
+
+            return json.dumps(result, indent=2) if isinstance(result, dict) else str(result)
+
+        except Exception as e:
+            logger.error(f"Error in image analysis: {e}")
+            debug_info = await self.mcp_client.debug_last_image()
+            return f"Error analyzing image: {str(e)}\n\nDebug info:\n{debug_info}"
+
+    def _clean_base64_data(self, base64_data: str) -> Optional[str]:
+        """Clean and validate base64 image data"""
+        if not base64_data:
+            return None
+
+        try:
+            # Remove data URL prefix if present
+            if base64_data.startswith('data:'):
+                # Extract just the base64 part after the comma
+                if ',' in base64_data:
+                    base64_data = base64_data.split(',', 1)[1]
+                else:
+                    return None
+
+            # Remove any whitespace and newlines
+            base64_data = re.sub(r'\s+', '', base64_data)
+
+            # Validate base64 format (should only contain valid base64 characters)
+            if not re.match(r'^[A-Za-z0-9+/]*={0,2}$', base64_data):
+                logger.error("Base64 data contains invalid characters")
+                return None
+
+            # Test if it's valid base64 by trying to decode it
+            try:
+                decoded = base64.b64decode(base64_data)
+                # Check if it looks like image data (has some minimum size)
+                if len(decoded) < 100:
+                    logger.error("Decoded data too small to be a valid image")
+                    return None
+
+                # Check for common image file headers
+                if not (decoded.startswith(b'\x89PNG') or  # PNG
+                       decoded.startswith(b'\xff\xd8\xff') or  # JPEG
+                       decoded.startswith(b'GIF87a') or  # GIF87a
+                       decoded.startswith(b'GIF89a') or  # GIF89a
+                       decoded.startswith(b'RIFF')):  # WebP
+                    logger.warning("Data doesn't appear to have a valid image header")
+
+                logger.info(f"Base64 validation successful: {len(base64_data)} chars -> {len(decoded)} bytes")
+                return base64_data
+
+            except Exception as decode_error:
+                logger.error(f"Base64 decode test failed: {decode_error}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Error cleaning base64 data: {e}")
+            return None
 
     async def _process_mcp_response(self, content_items: List[Dict]) -> str:
         """Process MCP response content, handling both text and images"""
@@ -133,35 +1873,15 @@ class MCPTool(BaseTool):
                     images.append(image_info)
                     text_parts.append(f"[SCREENSHOT CAPTURED: {image_info.get('description', 'Image')}]")
 
-        # Store images for potential model analysis
+        # Store images for analysis
         if images:
             self.mcp_client.store_images(images)
             logger.info(f"Stored {len(images)} images for analysis")
 
-        text_result = "\n".join(text_parts) if text_parts else "Operation completed"
-
-        # For screenshot tools, try immediate analysis
-        if images and "screenshot" in self.name.lower():
-            logger.info("Screenshot tool detected, attempting analysis...")
-            try:
-                analysis = await self.mcp_client.analyze_last_screenshot()
-                if analysis and "not working properly" not in analysis and "doesn't support vision" not in analysis:
-                    text_result += f"\n\n🔍 Screenshot Analysis:\n{analysis}"
-                else:
-                    text_result += f"\n\n📸 Screenshot saved for reference"
-                    if analysis:
-                        text_result += f"\nNote: {analysis}"
-            except Exception as e:
-                logger.error(f"Screenshot analysis failed: {e}")
-                text_result += f"\n\n📸 Screenshot saved but analysis failed: {str(e)}"
-
-        if images and "screenshot" not in self.name.lower():
-            text_result += f"\n\n📸 {len(images)} image(s) captured and available for analysis"
-
-        return text_result
+        return "\n".join(text_parts) if text_parts else "Operation completed"
 
     async def _process_image_content(self, image_item: Dict) -> Optional[Dict]:
-        """Process image content from MCP response"""
+        """Process image content from MCP response with proper validation"""
         try:
             image_data = image_item.get("data", "")
             mime_type = image_item.get("mimeType", "image/png")
@@ -169,19 +1889,18 @@ class MCPTool(BaseTool):
             if not image_data:
                 return None
 
-            # Handle base64 data URLs
-            if image_data.startswith("data:"):
-                # Extract base64 part from data URL
-                base64_data = image_data.split(",", 1)[1] if "," in image_data else image_data
-            else:
-                base64_data = image_data
+            # Clean the base64 data
+            cleaned_base64 = self._clean_base64_data(image_data)
+            if not cleaned_base64:
+                logger.error("Failed to clean base64 data from MCP response")
+                return None
 
             return {
                 "type": "image",
-                "base64": base64_data,
+                "base64": cleaned_base64,  # Use cleaned data
                 "mime_type": mime_type,
                 "description": f"Screenshot ({mime_type})",
-                "size_info": f"Base64 length: {len(base64_data)}"
+                "size_info": f"Base64 length: {len(cleaned_base64)}"
             }
 
         except Exception as e:
@@ -189,7 +1908,7 @@ class MCPTool(BaseTool):
             return None
 
 class MCPClient:
-    """Enhanced MCP Client with image storage and analysis capabilities"""
+    """MCP Client with enhanced image storage and validation"""
 
     def __init__(self, server_command: List[str]):
         self.server_command = server_command
@@ -197,382 +1916,108 @@ class MCPClient:
         self.tools_info = {}
         self.request_id = 0
         self.stored_images = []  # Store images for analysis
-        self.llm = None  # Will be set by the agent
 
     def store_images(self, images: List[Dict]):
-        """Store images for later analysis"""
-        self.stored_images.extend(images)
-        # Keep only the last 5 images to avoid memory issues
-        if len(self.stored_images) > 5:
-            self.stored_images = self.stored_images[-5:]
+        """Store images for later analysis with validation"""
+        valid_images = []
+        for image in images:
+            if self._validate_stored_image(image):
+                valid_images.append(image)
+            else:
+                logger.warning("Skipping invalid image in storage")
 
-    async def debug_last_image(self) -> Optional[str]:
-        """Comprehensive debug information about the last captured image"""
+        self.stored_images.extend(valid_images)
+
+        # Keep only the last 3 images to avoid memory issues
+        if len(self.stored_images) > 3:
+            self.stored_images = self.stored_images[-3:]
+
+    def _validate_stored_image(self, image: Dict) -> bool:
+        """Validate that stored image has proper base64 data"""
+        try:
+            base64_data = image.get('base64')
+            if not base64_data:
+                return False
+
+            # Try to decode to verify it's valid
+            decoded = base64.b64decode(base64_data)
+            return len(decoded) > 100  # Minimum reasonable size for an image
+
+        except Exception:
+            return False
+
+    async def get_last_image_base64(self) -> Optional[str]:
+        """Get the base64 data of the last stored image with validation"""
         if not self.stored_images:
-            return "No images stored"
+            return None
 
-        latest_image = self.stored_images[-1]
+        last_image = self.stored_images[-1]
+        base64_data = last_image.get('base64')
 
-        # Check if base64 is valid
-        try:
-            base64_bytes = base64.b64decode(latest_image['base64'])
-            is_valid_base64 = True
-            decoded_size = len(base64_bytes)
-        except Exception as e:
-            is_valid_base64 = False
-            decoded_size = 0
-
-        # Check image format
-        image_format = "Unknown"
-        if latest_image['base64'].startswith('/9j/'):
-            image_format = "JPEG"
-        elif latest_image['base64'].startswith('iVBORw0KGgo'):
-            image_format = "PNG"
-        elif latest_image['base64'].startswith('UklGR'):
-            image_format = "WebP"
-
-        debug_info = f"""
-🔍 Image Debug Info:
-- Storage: {'✅ Image stored' if latest_image else '❌ No image'}
-- Type: {latest_image['type']}
-- MIME Type: {latest_image['mime_type']}
-- Description: {latest_image['description']}
-- Base64 Length: {len(latest_image['base64'])} characters
-- Base64 Preview (first 100 chars): {latest_image['base64'][:100]}...
-- Base64 Preview (last 50 chars): ...{latest_image['base64'][-50:]}
-- Valid Base64: {'✅ Yes' if is_valid_base64 else '❌ No'}
-- Decoded Size: {decoded_size} bytes ({decoded_size/1024:.1f} KB)
-- Detected Format: {image_format}
-- Data URL Format: data:{latest_image['mime_type']};base64,[{len(latest_image['base64'])} chars]
-"""
-        return debug_info
-
-    async def test_lm_studio_vision(self) -> str:
-        """Test LM Studio's vision capabilities - optimized for Qwen 2.5-VL"""
-        try:
-            if not aiohttp:
-                return "❌ aiohttp not installed. Run: pip install aiohttp"
-
-            base_url = getattr(self.llm, 'base_url', 'http://localhost:1234/v1')
-            if hasattr(self.llm, 'openai_api_base'):
-                base_url = self.llm.openai_api_base
-
-            api_url = f"{base_url.rstrip('/')}/chat/completions"
-
-            # Test 1: Basic connection
-            test_payload = {
-                "model": "qwen2.5-vl-7b",  # Use specific model name
-                "messages": [{"role": "user", "content": "Hello! You are Qwen2.5-VL. Can you see and analyze images?"}],
-                "max_tokens": 100
-            }
-
-            async with aiohttp.ClientSession() as session:
-                # Test basic connection
-                try:
-                    async with session.post(
-                        api_url,
-                        json=test_payload,
-                        headers={"Content-Type": "application/json"},
-                        timeout=aiohttp.ClientTimeout(total=15)
-                    ) as resp:
-                        if resp.status != 200:
-                            error_text = await resp.text()
-                            return f"❌ Basic connection failed: {resp.status} - {error_text}"
-
-                        result = await resp.json()
-                        basic_response = result.get("choices", [{}])[0].get("message", {}).get("content", "No response")
-
-                except Exception as e:
-                    return f"❌ Connection error: {str(e)}"
-
-                # Test 2: Try with Qwen 2.5-VL optimized test image (small red square)
-                test_image_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
-
-                # Format 1: Standard multimodal format
-                vision_payload_1 = {
-                    "model": "qwen2.5-vl-7b",
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/png;base64,{test_image_b64}"
-                                    }
-                                },
-                                {
-                                    "type": "text",
-                                    "text": "What color is this image? Just say the color."
-                                }
-                            ]
-                        }
-                    ],
-                    "temperature": 0.1,
-                    "max_tokens": 50
-                }
-
-                vision_response_1 = None
-                vision_status_1 = None
-
-                try:
-                    async with session.post(
-                        api_url,
-                        json=vision_payload_1,
-                        headers={"Content-Type": "application/json"},
-                        timeout=aiohttp.ClientTimeout(total=45)  # Qwen can be slow
-                    ) as resp:
-                        vision_status_1 = resp.status
-                        if resp.status == 200:
-                            result = await resp.json()
-                            vision_response_1 = result.get("choices", [{}])[0].get("message", {}).get("content", "No response")
-                        else:
-                            vision_response_1 = await resp.text()
-
-                except Exception as e:
-                    vision_response_1 = f"Error: {str(e)}"
-                    vision_status_1 = "Exception"
-
-                # Test 3: Try alternative Qwen format
-                vision_payload_2 = {
-                    "model": "current",
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": f"<image>data:image/png;base64,{test_image_b64}</image>\n\nDescribe this image briefly."
-                        }
-                    ],
-                    "temperature": 0.1,
-                    "max_tokens": 50
-                }
-
-                vision_response_2 = None
-                vision_status_2 = None
-
-                try:
-                    async with session.post(
-                        api_url,
-                        json=vision_payload_2,
-                        headers={"Content-Type": "application/json"},
-                        timeout=aiohttp.ClientTimeout(total=45)
-                    ) as resp:
-                        vision_status_2 = resp.status
-                        if resp.status == 200:
-                            result = await resp.json()
-                            vision_response_2 = result.get("choices", [{}])[0].get("message", {}).get("content", "No response")
-                        else:
-                            vision_response_2 = await resp.text()
-
-                except Exception as e:
-                    vision_response_2 = f"Error: {str(e)}"
-                    vision_status_2 = "Exception"
-
-            # Analyze results
-            format1_works = (vision_status_1 == 200 and
-                           vision_response_1 and
-                           ('red' in vision_response_1.lower() or 'color' in vision_response_1.lower()))
-
-            format2_works = (vision_status_2 == 200 and
-                           vision_response_2 and
-                           ('red' in vision_response_2.lower() or 'color' in vision_response_2.lower()))
-
-            status = "✅ Working" if (format1_works or format2_works) else "❌ Not Working"
-
-            return f"""
-🧪 Qwen 2.5-VL Test Results:
-- API URL: {api_url}
-- Basic Connection: ✅ Success (Status 200)
-- Basic Response: "{basic_response[:150]}..."
-
-📊 Vision Tests:
-- Format 1 (Standard): {'✅' if vision_status_1 == 200 else '❌'} {vision_status_1}
-  Response: "{(vision_response_1 or '')[:100]}..."
-
-- Format 2 (Alternative): {'✅' if vision_status_2 == 200 else '❌'} {vision_status_2}
-  Response: "{(vision_response_2 or '')[:100]}..."
-
-🎯 Overall Vision Status: {status}
-{'✅ Qwen 2.5-VL vision is working!' if (format1_works or format2_works) else '❌ Vision may not be properly configured'}
-
-Recommended: Use Format {'1' if format1_works else '2' if format2_works else '1 (if you fix the setup)'}
-"""
-
-        except Exception as e:
-            return f"❌ Test failed with error: {str(e)}"
-
-    async def analyze_last_screenshot(self) -> Optional[str]:
-        """Analyze the last screenshot using LM Studio's vision format - optimized for Qwen 2.5-VL"""
-        if not self.stored_images or not self.llm:
+        # Validate the data before returning
+        if not base64_data:
+            logger.error("No base64 data in last stored image")
             return None
 
         try:
-            latest_image = self.stored_images[-1]
-            logger.info(f"Attempting to analyze image with Qwen 2.5-VL: {latest_image['description']}")
+            # Test decode to ensure it's valid
+            decoded = base64.b64decode(base64_data)
+            if len(decoded) < 100:
+                logger.error("Last stored image data too small")
+                return None
 
-            # Qwen 2.5-VL specific format attempts
-
-            # Approach 1: Qwen 2.5-VL prefers simple message format
-            try:
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{latest_image['mime_type']};base64,{latest_image['base64']}"
-                                }
-                            },
-                            {
-                                "type": "text",
-                                "text": "Describe this screenshot in detail. What do you see on this webpage? Include layout, text content, buttons, forms, and any interactive elements."
-                            }
-                        ]
-                    }
-                ]
-
-                response = await self.llm.ainvoke(messages)
-
-                if (response.content and
-                    "I would need to see it directly" not in response.content and
-                    "cannot see" not in response.content.lower() and
-                    len(response.content.strip()) > 50):
-                    logger.info("Qwen 2.5-VL analysis successful via LangChain!")
-                    return response.content
-
-            except Exception as e1:
-                logger.debug(f"Qwen 2.5-VL LangChain format failed: {e1}")
-
-            # Approach 2: Direct API call with Qwen-optimized format
-            try:
-                if not aiohttp:
-                    raise Exception("aiohttp not available")
-
-                # Qwen 2.5-VL API format
-                payload = {
-                    "model": "qwen2.5-vl-7b",  # Specific model name
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:{latest_image['mime_type']};base64,{latest_image['base64']}"
-                                    }
-                                },
-                                {
-                                    "type": "text",
-                                    "text": "Analyze this screenshot. Describe the webpage layout, visible text, buttons, forms, navigation elements, and overall content. Be specific and detailed."
-                                }
-                            ]
-                        }
-                    ],
-                    "temperature": 0.1,
-                    "max_tokens": 2000,
-                    "stream": False
-                }
-
-                # Get the base URL properly
-                base_url = getattr(self.llm, 'base_url', 'http://localhost:1234/v1')
-                if hasattr(self.llm, 'openai_api_base'):
-                    base_url = self.llm.openai_api_base
-
-                api_url = f"{base_url.rstrip('/')}/chat/completions"
-                logger.info(f"Trying Qwen 2.5-VL direct API call to: {api_url}")
-
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        api_url,
-                        json=payload,
-                        headers={"Content-Type": "application/json"},
-                        timeout=aiohttp.ClientTimeout(total=90)  # Qwen can be slower
-                    ) as resp:
-                        if resp.status == 200:
-                            result = await resp.json()
-                            if result.get("choices") and result["choices"][0].get("message"):
-                                content = result["choices"][0]["message"]["content"]
-                                if (content and
-                                    "I would need to see it directly" not in content and
-                                    "cannot see" not in content.lower() and
-                                    len(content.strip()) > 50):
-                                    logger.info("Qwen 2.5-VL direct API call successful!")
-                                    return content
-                        else:
-                            error_text = await resp.text()
-                            logger.error(f"Qwen 2.5-VL API call failed: {resp.status} - {error_text}")
-
-            except Exception as e2:
-                logger.debug(f"Qwen 2.5-VL direct API approach failed: {e2}")
-
-            # Approach 3: Try alternative message structure
-            try:
-                if aiohttp:
-                    # Some versions of Qwen prefer text first
-                    alt_payload = {
-                        "model": "current",
-                        "messages": [
-                            {
-                                "role": "user",
-                                "content": f"<image>data:{latest_image['mime_type']};base64,{latest_image['base64']}</image>\n\nPlease analyze this screenshot and describe what you see. Include details about the webpage layout, text content, interactive elements, and overall design."
-                            }
-                        ],
-                        "temperature": 0.1,
-                        "max_tokens": 2000
-                    }
-
-                    api_url = f"{base_url.rstrip('/')}/chat/completions"
-
-                    async with aiohttp.ClientSession() as session:
-                        async with session.post(
-                            api_url,
-                            json=alt_payload,
-                            headers={"Content-Type": "application/json"},
-                            timeout=aiohttp.ClientTimeout(total=90)
-                        ) as resp:
-                            if resp.status == 200:
-                                result = await resp.json()
-                                if result.get("choices") and result["choices"][0].get("message"):
-                                    content = result["choices"][0]["message"]["content"]
-                                    if (content and
-                                        "I would need to see it directly" not in content and
-                                        "cannot see" not in content.lower() and
-                                        len(content.strip()) > 50):
-                                        logger.info("Qwen 2.5-VL alternative format successful!")
-                                        return content
-
-            except Exception as e3:
-                logger.debug(f"Qwen 2.5-VL alternative format failed: {e3}")
-
-            # Test basic vision capability
-            try:
-                test_prompt = "Are you a vision-language model? Can you analyze images? Please answer YES or NO."
-                test_response = await self.llm.ainvoke(test_prompt)
-
-                if ("NO" in test_response.content.upper() or
-                    "cannot" in test_response.content.lower() or
-                    "do not" in test_response.content.lower()):
-                    return "Screenshot captured but Qwen 2.5-VL model reports it cannot see images. Check that the vision model is properly loaded in LM Studio."
-
-            except Exception as e4:
-                logger.debug(f"Qwen 2.5-VL vision capability test failed: {e4}")
-
-            return f"""Screenshot captured ({latest_image['size_info']}) but Qwen 2.5-VL cannot process the image.
-
-Possible issues:
-1. Make sure 'qwen/qwen2.5-vl-7b' is fully loaded in LM Studio
-2. Check that LM Studio shows 'Vision' capability for this model
-3. Verify the model has enough VRAM allocated
-4. Try reloading the model in LM Studio
-
-Image info: {latest_image['mime_type']}, {len(latest_image['base64'])} characters base64"""
+            logger.info(f"Retrieved last image: {len(base64_data)} base64 chars, {len(decoded)} bytes")
+            return base64_data
 
         except Exception as e:
-            logger.error(f"Error analyzing screenshot with Qwen 2.5-VL: {e}")
-            return f"Screenshot captured but analysis failed: {str(e)}"
+            logger.error(f"Last stored image has invalid base64 data: {e}")
+            return None
+
+    async def debug_last_image(self) -> str:
+        """Debug information about the last stored image"""
+        if not self.stored_images:
+            return "No images stored"
+
+        last_image = self.stored_images[-1]
+        base64_data = last_image.get('base64', '')
+
+        # Validation info
+        is_valid = False
+        decoded_size = 0
+        image_format = "Unknown"
+
+        try:
+            decoded = base64.b64decode(base64_data)
+            decoded_size = len(decoded)
+            is_valid = decoded_size > 100
+
+            # Detect format from headers
+            if decoded.startswith(b'\x89PNG'):
+                image_format = "PNG"
+            elif decoded.startswith(b'\xff\xd8\xff'):
+                image_format = "JPEG"
+            elif decoded.startswith(b'GIF87a') or decoded.startswith(b'GIF89a'):
+                image_format = "GIF"
+            elif decoded.startswith(b'RIFF'):
+                image_format = "WebP"
+
+        except Exception as e:
+            is_valid = False
+
+        return f"""
+🔍 Last Image Debug Info:
+- Base64 Length: {len(base64_data)} characters
+- Valid Base64: {'✅ Yes' if is_valid else '❌ No'}
+- Decoded Size: {decoded_size} bytes ({decoded_size/1024:.1f} KB)
+- Detected Format: {image_format}
+- MIME Type: {last_image.get('mime_type', 'unknown')}
+- Description: {last_image.get('description', 'No description')}
+- First 50 chars: {base64_data[:50]}...
+- Last 20 chars: ...{base64_data[-20:]}
+"""
 
     async def start(self):
-        """Start the MCP server process with enhanced buffer handling"""
+        """Start the MCP server process"""
         try:
             self.process = await asyncio.create_subprocess_exec(
                 *self.server_command,
@@ -611,13 +2056,6 @@ Image info: {latest_image['mime_type']}, {len(latest_image['base64'])} character
 
         except Exception as e:
             logger.error(f"Failed to start MCP server: {e}")
-            if self.process and self.process.stderr:
-                try:
-                    stderr_output = await asyncio.wait_for(self.process.stderr.read(1024), timeout=1)
-                    if stderr_output:
-                        logger.error(f"Server stderr: {stderr_output.decode()}")
-                except asyncio.TimeoutError:
-                    logger.error("Could not read stderr from server")
             raise
 
     async def stop(self):
@@ -692,16 +2130,6 @@ Image info: {latest_image['mime_type']}, {len(latest_image['base64'])} character
                         response_buffer = last_line.encode('utf-8')
 
                 except asyncio.TimeoutError:
-                    # Try to parse partial response
-                    if response_buffer:
-                        try:
-                            response_text = response_buffer.decode('utf-8', errors='ignore')
-                            response = json.loads(response_text.strip())
-                            if "error" in response:
-                                raise Exception(f"MCP Error: {response['error']}")
-                            return response.get("result", {})
-                        except json.JSONDecodeError:
-                            pass
                     raise Exception("MCP server response timeout")
 
         except Exception as e:
@@ -754,16 +2182,15 @@ Image info: {latest_image['mime_type']}, {len(latest_image['base64'])} character
         return langchain_tools
 
 class BrowserAutomationAgent:
-    """Enhanced browser automation agent with vision capabilities"""
+    """Browser automation agent with enhanced error handling"""
 
-    def __init__(self, lm_studio_url: str = "http://localhost:1234/v1", use_vision: bool = False):
+    def __init__(self, lm_studio_url: str = "http://localhost:1234/v1"):
         self.lm_studio_url = lm_studio_url
-        self.use_vision = use_vision
         self.mcp_client = None
         self.agent_executor = None
 
     async def setup(self, mcp_server_script_path: str):
-        """Setup agent with enhanced vision capabilities"""
+        """Setup agent with enhanced image handling"""
         try:
             # Initialize MCP client
             self.mcp_client = MCPClient([
@@ -778,60 +2205,70 @@ class BrowserAutomationAgent:
 
             logger.info(f"Created {len(tools)} tools from MCP server")
 
-            # Setup LM Studio with vision support if requested
-            model_name = "gemma-vision" if self.use_vision else "gemma"
-
+            # Setup Qwen model
             llm = ChatOpenAI(
                 base_url=self.lm_studio_url,
                 api_key="not-needed",
-                model=model_name,
+                model="qwen2.5-vl-7b",
                 temperature=0.1,
                 max_tokens=2000
             )
 
-            # Store LLM reference in MCP client for image analysis
-            self.mcp_client.llm = llm
-
             # Test connection
             try:
                 test_response = await llm.ainvoke("Hello, respond with 'Connection successful'")
-                logger.info(f"LM Studio connection test: {test_response.content}")
+                logger.info(f"Qwen connection test: {test_response.content}")
             except Exception as e:
-                logger.error(f"LM Studio connection failed: {e}")
-                raise ValueError(f"Cannot connect to LM Studio: {str(e)}")
+                logger.error(f"Qwen connection failed: {e}")
+                raise ValueError(f"Cannot connect to Qwen: {str(e)}")
 
-            # Enhanced prompt with vision capabilities
-            system_prompt = """You are an advanced browser automation assistant with vision capabilities.
+            # Enhanced system prompt with corrected instructions
+            system_prompt = """You are an advanced browser automation assistant using Qwen with vision capabilities.
+
+CRITICAL WORKFLOW FOR INTERACTIVE TASKS:
+1. Take a screenshot to see the current page
+2. Use analyze_image_for_element tool to find specific elements by describing them
+3. Use the coordinates returned to click or interact with elements
+4. Always verify actions by taking another screenshot
 
 Available tools:
-- launch_browser: Start a new browser session
-- navigate: Go to a specific URL
-- take_screenshot: Capture the current page (automatically analyzed) should mandatorily call the moondream tool after capturing the screenshot.
-- moondream: Send the captured screenshot image to the moondream tool with the specific element name to get the element's coordinates.
-- take_marked_screenshot: Capture with highlighted elements
-- get_element_data: Inspect page elements
-- click: Click on elements using the coordinates received from the moondream model
+- launch_browser: Start browser session
+- navigate: Go to a URL
+- take_screenshot: Capture current page (stores image data automatically)
+- analyze_image_for_element: Analyze the last screenshot for a specific element, returns coordinates
+- click_at_coordinates: Click at specific x,y coordinates
 - input_text: Type into input fields
 - key_press: Press keyboard keys
 - scroll: Scroll the page
-- wait_for_element: Wait for elements to appear
-- get_page_info: Get current page information
-- close_browser: Close the browser
+- wait_for_element: Wait for elements
+- close_browser: Close browser
 
-When working with screenshots:
-1. Screenshots are automatically analyzed when captured
-2. Use the analysis to understand page content and layout
-3. Make decisions based on what you can see in the screenshots
-4. Be specific about elements you want to interact with
+CRITICAL PROCESS FOR ELEMENT INTERACTION:
+1. ALWAYS take_screenshot() first to capture current page
+2. Call analyze_image_for_element(element_name="clear description of what you want to click")
+   - IMPORTANT: ONLY pass element_name parameter - the tool automatically uses the last screenshot
+   - Just pass: analyze_image_for_element(element_name="description")
+   - Be very specific: "blue login button", "red submit button", "username input field"
+3. Use click_at_coordinates(x=returned_x, y=returned_y) with the coordinates returned
 
-Best practices:
-1. Always take a screenshot first to see the current state
-2. Use element inspection before clicking or typing
-3. Wait for elements to load when necessary
-4. Provide clear feedback about your actions
-5. Handle errors gracefully and suggest alternatives
+IMPORTANT PARAMETER USAGE:
+- analyze_image_for_element: ONLY pass element_name parameter
+- Do NOT pass image_base64 - it will be retrieved automatically from the last screenshot
+- Correct: analyze_image_for_element(element_name="login button")
+- Wrong: analyze_image_for_element(image_base64="...", element_name="...")
 
-Be helpful, accurate, and thorough in your browser automation tasks."""
+ERROR HANDLING:
+- If base64 error occurs, take a new screenshot and try again
+- If element not found, take screenshot and try with different description
+- Be patient - image analysis can take time
+
+Example sequence:
+1. take_screenshot()
+2. analyze_image_for_element(element_name="login button in top right corner")
+3. click_at_coordinates(x=received_x, y=received_y)
+4. take_screenshot() to verify the click worked
+
+Be very descriptive when asking for element analysis - include colors, positions, and text when possible."""
 
             prompt = ChatPromptTemplate.from_messages([
                 ("system", system_prompt),
@@ -845,7 +2282,7 @@ Be helpful, accurate, and thorough in your browser automation tasks."""
                 agent=agent,
                 tools=tools,
                 verbose=True,
-                max_iterations=10,
+                max_iterations=15,
                 return_intermediate_steps=True
             )
 
@@ -864,107 +2301,45 @@ Be helpful, accurate, and thorough in your browser automation tasks."""
 
         try:
             result = await self.agent_executor.ainvoke({"input": query})
-
-            # Include image information in response if available
-            if self.mcp_client.stored_images:
-                image_count = len(self.mcp_client.stored_images)
-                result["output"] += f"\n\n📸 Session includes {image_count} screenshot(s) for reference."
-
             return result["output"]
 
         except Exception as e:
             logger.error(f"Error running agent: {e}")
             return f"Error: {str(e)}"
 
-    async def get_last_screenshot_analysis(self) -> Optional[str]:
-        """Get analysis of the last screenshot"""
-        if self.mcp_client:
-            return await self.mcp_client.analyze_last_screenshot()
-        return None
-
-    async def test_lm_studio_vision(self) -> str:
-        """Test LM Studio's vision capabilities"""
-        if self.mcp_client:
-            return await self.mcp_client.test_lm_studio_vision()
-        return "MCP client not available"
-
-    async def save_last_screenshot(self, filename: str = "debug_screenshot.png") -> str:
-        """Save the last screenshot to a file"""
-        if self.mcp_client:
-            return await self.mcp_client.save_last_image_to_file(filename)
-        return "MCP client not available"
-
-    async def debug_last_screenshot(self) -> Optional[str]:
-        """Get debug information about the last screenshot"""
+    async def debug_last_image(self) -> str:
+        """Debug the last stored image"""
         if self.mcp_client:
             return await self.mcp_client.debug_last_image()
-        return None
+        return "MCP client not available"
 
     async def cleanup(self):
         """Cleanup resources"""
         if self.mcp_client:
             await self.mcp_client.stop()
 
-# Example usage with vision
-async def example_with_vision():
-    """Example using vision capabilities"""
-    agent = BrowserAutomationAgent(use_vision=True)
-    await agent.setup("playwright_mcp_server.py")
-
-    try:
-        result = await agent.run("""
-        1. Launch a browser
-        2. Navigate to https://example.com
-        3. Take a screenshot and analyze the page
-        4. Describe what you see and suggest possible interactions
-        """)
-        print(result)
-
-        # Get additional screenshot analysis
-        analysis = await agent.get_last_screenshot_analysis()
-        if analysis:
-            print(f"\nDetailed Analysis: {analysis}")
-
-    finally:
-        await agent.cleanup()
-
 async def main():
-    """Main interactive function"""
+    """Main interactive function with debug commands"""
     import sys
-
-    # Check for vision flag
-    use_vision = "--vision" in sys.argv
 
     # Path to your MCP server script
     mcp_server_path = "playwright_mcp_server.py"  # Update this path as needed
 
     # Initialize the agent
-    agent = BrowserAutomationAgent(use_vision=use_vision)
+    agent = BrowserAutomationAgent()
 
     try:
         # Setup the agent
-        print("🤖 Setting up browser automation agent...")
-        if use_vision:
-            print("🔍 Vision capabilities enabled")
+        print("🤖 Setting up enhanced browser automation agent...")
         await agent.setup(mcp_server_path)
 
-        print("🤖 Browser Automation Agent is ready!")
-        print("You can ask me to:")
-        print("- Navigate to websites")
-        print("- Take screenshots")
-        print("- Click on elements")
-        print("- Fill out forms")
-        print("- Extract data from pages")
-        if use_vision:
-            print("- Analyze screenshots automatically")
-        print("- And much more!")
-        print("\nSpecial commands:")
-        print("- 'debug' - Show debug info about last screenshot")
-        print("- 'analyze' - Force analyze last screenshot")
-        print("- 'test vision' - Test if vision is working")
-        print("- 'test api' - Test LM Studio vision API directly")
-        print("- 'save image' - Save last screenshot to file")
-        print("\nType 'quit' to exit\n")
+        print("🤖 Enhanced Browser Automation Agent is ready!")
+        print("This agent uses improved base64 image handling.")
+        print("\nAvailable commands:")
+        print("- Normal automation tasks")
+        print("- 'debug' - Show debug info about last image")
+        print("- 'quit' - Exit")
+        print("\nType your request:\n")
 
         # Interactive loop
         while True:
@@ -977,44 +2352,14 @@ async def main():
                 if not user_input.strip():
                     continue
 
-                # Handle special debug commands
                 if user_input.lower() == 'debug':
-                    debug_info = await agent.debug_last_screenshot()
-                    print(f"\n🔧 {debug_info}")
-                    continue
-
-                if user_input.lower() == 'analyze':
-                    analysis = await agent.get_last_screenshot_analysis()
-                    if analysis:
-                        print(f"\n🔍 Analysis: {analysis}")
-                    else:
-                        print("\n❌ No screenshots to analyze")
-                    continue
-
-                if user_input.lower() == 'test vision':
-                    result = await agent.run("Can you see and process images? Please respond with YES or NO and explain your capabilities.")
-                    print(f"\n🧪 Vision Test: {result}")
-                    continue
-
-                if user_input.lower() == 'test api':
-                    api_test = await agent.test_lm_studio_vision()
-                    print(f"\n🔧 API Test Results: {api_test}")
-                    continue
-
-                if user_input.lower() == 'save image':
-                    save_result = await agent.save_last_screenshot()
-                    print(f"\n💾 {save_result}")
+                    debug_info = await agent.debug_last_image()
+                    print(f"\n🔧 Debug Info: {debug_info}")
                     continue
 
                 print("\n🤖 Working on it...")
                 result = await agent.run(user_input)
                 print(f"\n✅ Result: {result}")
-
-                # Show additional screenshot analysis if available
-                if use_vision:
-                    analysis = await agent.get_last_screenshot_analysis()
-                    if analysis and "Screenshot captured but" not in analysis:
-                        print(f"\n🔍 Additional Analysis: {analysis}")
 
             except KeyboardInterrupt:
                 break
@@ -1023,21 +2368,12 @@ async def main():
 
     except Exception as e:
         print(f"❌ Failed to setup agent: {str(e)}")
-        print("\nMake sure:")
+        print("\nTroubleshooting checklist:")
         print("1. LM Studio is running on localhost:1234")
-        print("2. A model is loaded in LM Studio")
-        if use_vision:
-            print("3. The loaded model supports vision (like LLaVA)")
+        print("2. Qwen2.5-VL model is loaded in LM Studio")
         print("3. MCP server script path is correct")
-        print("4. All required dependencies are installed")
-        print("   - pip install langchain langchain-community langchain-openai playwright aiohttp")
-        print("   - playwright install")
-        if use_vision:
-            print("5. Load a VISION model in LM Studio, such as:")
-            print("   - qwen2-vl-2b-instruct")
-            print("   - llava-v1.6-mistral-7b")
-            print("   - minicpm-v-2_6")
-            print("   - Make sure the model shows 'Vision' capabilities in LM Studio")
+        print("4. Image analysis service is running on localhost:2020") # Updated port
+        print("5. Image analysis service accepts proper base64 format")
 
     finally:
         # Cleanup
@@ -1045,532 +2381,4 @@ async def main():
         print("\n👋 Goodbye!")
 
 if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) > 1 and sys.argv[1] == "example":
-        # Run example instead of interactive mode
-        asyncio.run(example_with_vision())
-    else:
-        # Run interactive mode
-        asyncio.run(main())
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# #!/usr/bin/env python3
-# """
-# MCP Client using LangChain with Gemma model through LM Studio
-# Connects to the Playwright MCP server for browser automation
-# """
-
-# import asyncio
-# import json
-# import subprocess
-# import logging
-# from typing import Any, Dict, List, Optional, Union
-# from pathlib import Path
-
-# from langchain.agents import AgentExecutor, create_tool_calling_agent
-# from langchain.prompts import ChatPromptTemplate
-# from langchain_core.tools import BaseTool
-# from langchain_core.callbacks import CallbackManagerForToolRun
-# from langchain_core.pydantic_v1 import BaseModel, Field
-# try:
-#     from langchain_openai import ChatOpenAI
-# except ImportError:
-#     try:
-#         from langchain_community.chat_models import ChatOpenAI
-#     except ImportError:
-#         from langchain.chat_models import ChatOpenAI
-
-# import requests
-
-# # Configure logging
-# logging.basicConfig(level=logging.INFO)
-# logger = logging.getLogger(__name__)
-
-# class MCPToolInput(BaseModel):
-#     """Dynamic input schema for MCP tools"""
-#     pass
-
-# class MCPTool(BaseTool):
-#     """Base class for MCP tools with proper LangChain compatibility"""
-
-#     # Define mcp_client as a class attribute to satisfy Pydantic
-#     mcp_client: Any = None
-
-#     def __init__(self, tool_name: str, tool_description: str, mcp_client: 'MCPClient', input_schema: Optional[Dict] = None):
-#         # Create a dynamic input model if schema is provided
-#         args_schema = None
-
-#         if input_schema and input_schema.get("properties"):
-#             properties = input_schema.get("properties", {})
-#             required = input_schema.get("required", [])
-
-#             # Create dynamic fields
-#             annotations = {}
-#             field_info = {}
-
-#             for prop_name, prop_info in properties.items():
-#                 # Basic type mapping
-#                 if prop_info.get("type") == "integer":
-#                     field_type = int
-#                 elif prop_info.get("type") == "boolean":
-#                     field_type = bool
-#                 elif prop_info.get("type") == "array":
-#                     field_type = List[str]
-#                 else:
-#                     field_type = str
-
-#                 # Handle optional vs required fields
-#                 if prop_name in required:
-#                     annotations[prop_name] = field_type
-#                     field_info[prop_name] = Field(description=prop_info.get("description", ""))
-#                 else:
-#                     annotations[prop_name] = Optional[field_type]
-#                     field_info[prop_name] = Field(default=None, description=prop_info.get("description", ""))
-
-#             # Create dynamic model
-#             if annotations:
-#                 DynamicInput = type(
-#                     f"{tool_name}Input",
-#                     (BaseModel,),
-#                     {
-#                         "__annotations__": annotations,
-#                         **field_info
-#                     }
-#                 )
-#                 args_schema = DynamicInput
-
-#         # Initialize with all required parameters
-#         super().__init__(
-#             name=tool_name,
-#             description=tool_description,
-#             args_schema=args_schema
-#         )
-
-#         # Set the mcp_client after initialization
-#         self.mcp_client = mcp_client
-
-#     def _run(self, **kwargs) -> str:
-#         """Run the tool synchronously"""
-#         return asyncio.run(self._arun(**kwargs))
-
-#     async def _arun(self, **kwargs) -> str:
-#         """Run the tool asynchronously"""
-#         try:
-#             # Filter out None values
-#             filtered_kwargs = {k: v for k, v in kwargs.items() if v is not None}
-
-#             result = await self.mcp_client.call_tool(self.name, filtered_kwargs)
-
-#             # Handle the MCP response format
-#             if isinstance(result, dict):
-#                 # Check if it's a list of content items
-#                 if "content" in result:
-#                     content_items = result["content"]
-#                     if isinstance(content_items, list):
-#                         text_content = []
-#                         for item in content_items:
-#                             if item.get("type") == "text":
-#                                 text_content.append(item.get("text", ""))
-#                         return "\n".join(text_content) if text_content else json.dumps(result, indent=2)
-
-#                 return json.dumps(result, indent=2)
-#             else:
-#                 return str(result)
-
-#         except Exception as e:
-#             logger.error(f"Error calling {self.name}: {e}")
-#             return f"Error calling {self.name}: {str(e)}"
-
-# class MCPClient:
-#     """Client for communicating with MCP servers using stdio transport"""
-
-#     def __init__(self, server_command: List[str]):
-#         self.server_command = server_command
-#         self.process = None
-#         self.tools_info = {}
-#         self.request_id = 0
-
-#     async def start(self):
-#         """Start the MCP server process"""
-#         try:
-#             self.process = await asyncio.create_subprocess_exec(
-#                 *self.server_command,
-#                 stdin=asyncio.subprocess.PIPE,
-#                 stdout=asyncio.subprocess.PIPE,
-#                 stderr=asyncio.subprocess.PIPE
-#             )
-
-#             # Wait a moment for the server to start
-#             await asyncio.sleep(2)
-
-#             # Initialize the server with proper MCP protocol
-#             init_response = await self._send_request("initialize", {
-#                 "protocolVersion": "2024-11-05",
-#                 "capabilities": {
-#                     "roots": {"listChanged": True},
-#                     "sampling": {}
-#                 },
-#                 "clientInfo": {
-#                     "name": "langchain-mcp-client",
-#                     "version": "1.0.0"
-#                 }
-#             })
-
-#             logger.info(f"MCP Server initialized: {init_response}")
-
-#             # Send initialized notification
-#             await self._send_notification("notifications/initialized")
-
-#             # List available tools
-#             tools_response = await self._send_request("tools/list", {})
-#             if "tools" in tools_response:
-#                 for tool in tools_response["tools"]:
-#                     self.tools_info[tool["name"]] = tool
-
-#             logger.info(f"Connected to MCP server. Available tools: {list(self.tools_info.keys())}")
-
-#         except Exception as e:
-#             logger.error(f"Failed to start MCP server: {e}")
-#             if self.process and self.process.stderr:
-#                 try:
-#                     stderr_output = await asyncio.wait_for(self.process.stderr.read(1024), timeout=1)
-#                     if stderr_output:
-#                         logger.error(f"Server stderr: {stderr_output.decode()}")
-#                 except asyncio.TimeoutError:
-#                     logger.error("Could not read stderr from server")
-#             raise
-
-#     async def stop(self):
-#         """Stop the MCP server process"""
-#         if self.process:
-#             try:
-#                 self.process.terminate()
-#                 await asyncio.wait_for(self.process.wait(), timeout=5)
-#             except asyncio.TimeoutError:
-#                 self.process.kill()
-#                 await self.process.wait()
-
-#     def _get_next_id(self) -> int:
-#         """Get next request ID"""
-#         self.request_id += 1
-#         return self.request_id
-
-#     async def _send_request(self, method: str, params: Optional[Dict] = None) -> Dict:
-#         """Send a request to the MCP server"""
-#         if not self.process:
-#             raise Exception("MCP server not started")
-
-#         request = {
-#             "jsonrpc": "2.0",
-#             "id": self._get_next_id(),
-#             "method": method,
-#             "params": params or {}
-#         }
-
-#         request_json = json.dumps(request) + "\n"
-#         logger.debug(f"Sending request: {request_json.strip()}")
-
-#         self.process.stdin.write(request_json.encode())
-#         await self.process.stdin.drain()
-
-#         # Read response with timeout
-#         try:
-#             response_line = await asyncio.wait_for(
-#                 self.process.stdout.readline(),
-#                 timeout=30
-#             )
-#         except asyncio.TimeoutError:
-#             raise Exception("MCP server response timeout")
-
-#         if not response_line:
-#             raise Exception("MCP server closed connection")
-
-#         response_text = response_line.decode().strip()
-#         logger.debug(f"Received response: {response_text}")
-
-#         try:
-#             response = json.loads(response_text)
-#         except json.JSONDecodeError as e:
-#             raise Exception(f"Invalid JSON response: {response_text}")
-
-#         if "error" in response:
-#             raise Exception(f"MCP Error: {response['error']}")
-
-#         return response.get("result", {})
-
-#     async def _send_notification(self, method: str, params: Optional[Dict] = None):
-#         """Send a notification to the MCP server"""
-#         if not self.process:
-#             raise Exception("MCP server not started")
-
-#         notification = {
-#             "jsonrpc": "2.0",
-#             "method": method,
-#             "params": params or {}
-#         }
-
-#         notification_json = json.dumps(notification) + "\n"
-#         logger.debug(f"Sending notification: {notification_json.strip()}")
-
-#         self.process.stdin.write(notification_json.encode())
-#         await self.process.stdin.drain()
-
-#     async def call_tool(self, tool_name: str, arguments: Dict) -> Any:
-#         """Call a tool on the MCP server"""
-#         return await self._send_request("tools/call", {
-#             "name": tool_name,
-#             "arguments": arguments
-#         })
-
-#     def create_langchain_tools(self) -> List[MCPTool]:
-#         """Create LangChain tools from MCP tools"""
-#         langchain_tools = []
-
-#         for tool_name, tool_info in self.tools_info.items():
-#             try:
-#                 tool = MCPTool(
-#                     tool_name=tool_name,
-#                     tool_description=tool_info.get("description", f"MCP tool: {tool_name}"),
-#                     mcp_client=self,
-#                     input_schema=tool_info.get("inputSchema")
-#                 )
-#                 langchain_tools.append(tool)
-#             except Exception as e:
-#                 logger.warning(f"Failed to create tool {tool_name}: {e}")
-#                 continue
-
-#         return langchain_tools
-
-# class BrowserAutomationAgent:
-#     """LangChain agent for browser automation using MCP tools"""
-
-#     def __init__(self, lm_studio_url: str = "http://localhost:1234/v1"):
-#         self.lm_studio_url = lm_studio_url
-#         self.mcp_client = None
-#         self.agent_executor = None
-
-#     async def setup(self, mcp_server_script_path: str):
-#         """Setup the agent with MCP client and LM Studio connection"""
-
-#         try:
-#             # Initialize MCP client
-#             self.mcp_client = MCPClient([
-#                 "python3", mcp_server_script_path
-#             ])
-#             await self.mcp_client.start()
-
-#             # Create LangChain tools from MCP tools
-#             tools = self.mcp_client.create_langchain_tools()
-
-#             if not tools:
-#                 raise ValueError("No tools were successfully created from MCP server")
-
-#             logger.info(f"Created {len(tools)} tools from MCP server")
-
-#             # Setup LM Studio connection (using OpenAI-compatible API)
-#             llm = ChatOpenAI(
-#                 base_url=self.lm_studio_url,
-#                 api_key="not-needed",  # LM Studio doesn't require API key
-#                 model="gemma",  # This should match your loaded model in LM Studio
-#                 temperature=0.1,
-#                 max_tokens=1000
-#             )
-
-#             # Test LM Studio connection
-#             try:
-#                 test_response = await llm.ainvoke("Hello, can you respond with 'Connection successful'?")
-#                 logger.info(f"LM Studio connection test: {test_response.content}")
-#             except Exception as e:
-#                 logger.error(f"LM Studio connection test failed: {e}")
-#                 raise ValueError(f"Cannot connect to LM Studio: {str(e)}. Make sure it's running on localhost:1234 with a model loaded.")
-
-#             # Create prompt template
-#             prompt = ChatPromptTemplate.from_messages([
-#                 ("system", """You are a helpful assistant that can control a web browser using various tools.
-
-# Available browser automation tools:
-# - launch_browser: Launch a new browser instance
-# - navigate: Navigate to a URL
-# - take_screenshot: Take a screenshot of the page
-# - take_marked_screenshot: Take a screenshot with highlighted elements
-# - get_element_data: Get information about elements on the page
-# - click: Click on elements
-# - input_text: Type text into input fields
-# - key_press: Press keyboard keys
-# - scroll: Scroll the page
-# - wait_for_element: Wait for elements to appear
-# - get_page_info: Get current page information
-# - close_browser: Close the browser
-
-# When helping with browser automation:
-# 1. Always take screenshots to see what's on the page
-# 2. Use get_element_data to inspect elements before interacting with them
-# 3. Be specific about selectors (CSS selectors work best)
-# 4. Wait for elements to load when needed
-# 5. Provide clear feedback about what you're doing
-
-# Answer the user's request step by step, using the available tools as needed."""),
-#                 ("human", "{input}"),
-#                 ("placeholder", "{agent_scratchpad}")
-#             ])
-
-#             # Create the agent
-#             try:
-#                 agent = create_tool_calling_agent(llm, tools, prompt)
-#                 self.agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
-#                 logger.info("Browser automation agent setup complete")
-#             except Exception as e:
-#                 logger.error(f"Failed to create agent: {e}")
-#                 raise ValueError(f"Failed to create LangChain agent: {str(e)}")
-
-#         except Exception as e:
-#             logger.error(f"Setup failed: {e}")
-#             if self.mcp_client:
-#                 await self.mcp_client.stop()
-#             raise
-
-#     async def run(self, query: str) -> str:
-#         """Run the agent with a query"""
-#         if not self.agent_executor:
-#             raise ValueError("Agent not setup. Call setup() first.")
-
-#         try:
-#             result = await self.agent_executor.ainvoke({"input": query})
-#             return result["output"]
-#         except Exception as e:
-#             logger.error(f"Error running agent: {e}")
-#             return f"Error: {str(e)}"
-
-#     async def cleanup(self):
-#         """Cleanup resources"""
-#         if self.mcp_client:
-#             await self.mcp_client.stop()
-
-# async def main():
-#     """Main function to demonstrate the browser automation agent"""
-
-#     # Path to your MCP server script
-#     mcp_server_path = "playwright_mcp_server.py"  # Update this path
-
-#     # Initialize the agent
-#     agent = BrowserAutomationAgent()
-
-#     try:
-#         # Setup the agent
-#         print("🤖 Setting up browser automation agent...")
-#         await agent.setup(mcp_server_path)
-
-#         print("🤖 Browser Automation Agent is ready!")
-#         print("You can ask me to:")
-#         print("- Navigate to websites")
-#         print("- Take screenshots")
-#         print("- Click on elements")
-#         print("- Fill out forms")
-#         print("- Extract data from pages")
-#         print("- And much more!")
-#         print("\nType 'quit' to exit\n")
-
-#         # Interactive loop
-#         while True:
-#             try:
-#                 user_input = input("\n👤 What would you like me to do? ")
-
-#                 if user_input.lower() in ['quit', 'exit', 'q']:
-#                     break
-
-#                 if not user_input.strip():
-#                     continue
-
-#                 print("\n🤖 Working on it...")
-#                 result = await agent.run(user_input)
-#                 print(f"\n✅ Result: {result}")
-
-#             except KeyboardInterrupt:
-#                 break
-#             except Exception as e:
-#                 print(f"\n❌ Error: {str(e)}")
-
-#     except Exception as e:
-#         print(f"❌ Failed to setup agent: {str(e)}")
-#         print("\nMake sure:")
-#         print("1. LM Studio is running on localhost:1234")
-#         print("2. A model (like Gemma) is loaded in LM Studio")
-#         print("3. MCP server script path is correct")
-#         print("4. All required dependencies are installed")
-#         print("   - pip install langchain langchain-community playwright mcp")
-#         print("   - playwright install")
-
-#     finally:
-#         # Cleanup
-#         await agent.cleanup()
-#         print("\n👋 Goodbye!")
-
-# # Example usage functions
-# async def example_web_scraping():
-#     """Example: Web scraping workflow"""
-#     agent = BrowserAutomationAgent()
-#     await agent.setup("playwright_mcp_server.py")
-
-#     try:
-#         # Navigate to a website and extract data
-#         result = await agent.run("""
-#         1. Launch a browser
-#         2. Navigate to https://example.com
-#         3. Take a screenshot
-#         4. Get information about all links on the page
-#         5. Click on the first link (if any)
-#         """)
-#         print(result)
-
-#     finally:
-#         await agent.cleanup()
-
-# async def example_form_filling():
-#     """Example: Form filling workflow"""
-#     agent = BrowserAutomationAgent()
-#     await agent.setup("playwright_mcp_server.py")
-
-#     try:
-#         result = await agent.run("""
-#         1. Launch a browser
-#         2. Navigate to a website with a search form
-#         3. Find the search input field
-#         4. Type "playwright automation" in the search field
-#         5. Click the search button
-#         6. Take a screenshot of the results
-#         """)
-#         print(result)
-
-#     finally:
-#         await agent.cleanup()
-
-# if __name__ == "__main__":
-#     # Run the interactive agent
-#     asyncio.run(main())
-
-#     # Or run specific examples:
-#     # asyncio.run(example_web_scraping())
-#     # asyncio.run(example_form_filling())
+    asyncio.run(main())
