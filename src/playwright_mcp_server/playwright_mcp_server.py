@@ -9,14 +9,13 @@ import base64
 import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple, Union
-from pathlib import Path
-import tempfile
+from PIL import Image
+import requests
+import moondream as md
 import os
-
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Locator
 from mcp.server.fastmcp import FastMCP
 from mcp.types import Tool, TextContent, ImageContent, EmbeddedResource
-import mcp.server.stdio
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -346,6 +345,261 @@ async def take_marked_screenshot(
         error_result = {'success': False, 'error': str(e)}
         return [TextContent(type="text", text=json.dumps(error_result, indent=2))]
 
+model = md.vl(endpoint="http://localhost:1234/v1")
+
+@mcp.tool
+async def test_moondream_pointing(
+    image_path: str,
+    target_object: str,
+    moondream_url: str = "http://localhost:2020/v1/point",
+    timeout: int = 30
+) -> Dict[str, Any]:
+    """
+    Test Moondream's pointing capability to find specific elements in images.
+
+    Args:
+        image_path: Path to the image file to analyze
+        target_object: Description of the object to find (e.g., "ESPN app icon")
+        moondream_url: URL of the Moondream server endpoint
+        timeout: Request timeout in seconds
+
+    Returns:
+        Dictionary containing test results, coordinates, and status information
+    """
+
+    def encode_image_to_base64(path: str) -> str:
+        """Encode image to base64 string for API requests."""
+        try:
+            with open(path, "rb") as image_file:
+                encoded = base64.b64encode(image_file.read()).decode('utf-8')
+                if path.lower().endswith('.png'):
+                    return f"data:image/png;base64,{encoded}"
+                else:
+                    return f"data:image/jpeg;base64,{encoded}"
+        except Exception as e:
+            raise Exception(f"Failed to encode image: {str(e)}")
+
+    result = {
+        "success": False,
+        "image_path": image_path,
+        "target_object": target_object,
+        "image_dimensions": None,
+        "points_found": 0,
+        "coordinates": [],
+        "error": None,
+        "raw_response": None,
+        "request_id": None
+    }
+
+    try:
+        # Check if image exists
+        if not os.path.exists(image_path):
+            result["error"] = f"Image not found at {image_path}"
+            return result
+
+        # Load image and get dimensions
+        image = Image.open(image_path)
+        width, height = image.size
+        result["image_dimensions"] = {"width": width, "height": height}
+
+        # Encode image to base64
+        image_base64 = encode_image_to_base64(image_path)
+
+        # Prepare API request
+        point_data = {
+            "image_url": image_base64,
+            "object": target_object
+        }
+
+        # Send request to Moondream
+        response = requests.post(moondream_url, json=point_data, timeout=timeout)
+
+        if response.status_code != 200:
+            result["error"] = f"API Error: {response.status_code} - {response.text}"
+            return result
+
+        # Parse response
+        api_result = response.json()
+        result["raw_response"] = api_result
+
+        # Process coordinates
+        if "points" in api_result and api_result["points"]:
+            points = api_result["points"]
+            result["points_found"] = len(points)
+
+            for i, point in enumerate(points):
+                # Get normalized coordinates (0-1 range)
+                norm_x = point.get("x", 0)
+                norm_y = point.get("y", 0)
+
+                # Convert to pixel coordinates
+                pixel_x = int(norm_x * width)
+                pixel_y = int(norm_y * height)
+
+                # Check if coordinates are within bounds
+                within_bounds = (0 <= pixel_x <= width and 0 <= pixel_y <= height)
+
+                coordinate_info = {
+                    "point_index": i + 1,
+                    "normalized": {"x": norm_x, "y": norm_y},
+                    "pixel": {"x": pixel_x, "y": pixel_y},
+                    "relative_position": {
+                        "x_percent": norm_x * 100,
+                        "y_percent": norm_y * 100
+                    },
+                    "within_bounds": within_bounds
+                }
+
+                result["coordinates"].append(coordinate_info)
+
+            result["success"] = True
+
+        elif "error" in api_result:
+            result["error"] = f"Moondream Error: {api_result['error']}"
+
+        else:
+            result["error"] = f"No points found for '{target_object}'"
+
+        # Store request ID if available
+        if "request_id" in api_result:
+            result["request_id"] = api_result["request_id"]
+
+        return result
+
+    except requests.exceptions.ConnectionError:
+        result["error"] = "Cannot connect to Moondream server"
+        return result
+
+    except requests.exceptions.Timeout:
+        result["error"] = "Request timed out"
+        return result
+
+    except Exception as e:
+        result["error"] = f"Unexpected error: {str(e)}"
+        return result
+
+
+@mcp.tool
+async def test_moondream_health(
+    moondream_url: str = "http://localhost:2020",
+    timeout: int = 5
+) -> Dict[str, Any]:
+    """
+    Test if Moondream server is accessible and responsive.
+
+    Args:
+        moondream_url: Base URL of the Moondream server
+        timeout: Request timeout in seconds
+
+    Returns:
+        Dictionary containing server health status
+    """
+
+    result = {
+        "server_accessible": False,
+        "status_code": None,
+        "response_time_ms": None,
+        "error": None,
+        "server_url": moondream_url
+    }
+
+    try:
+        import time
+        start_time = time.time()
+
+        health_url = f"{moondream_url.rstrip('/')}/health"
+        response = requests.get(health_url, timeout=timeout)
+
+        end_time = time.time()
+        result["response_time_ms"] = round((end_time - start_time) * 1000, 2)
+        result["status_code"] = response.status_code
+        result["server_accessible"] = True
+
+        return result
+
+    except requests.exceptions.ConnectionError:
+        result["error"] = "Server is not accessible"
+        return result
+
+    except requests.exceptions.Timeout:
+        result["error"] = "Health check timed out"
+        return result
+
+    except Exception as e:
+        result["error"] = f"Health check failed: {str(e)}"
+        return result
+
+
+@mcp.tool
+async def run_moondream_test_suite(
+    image_path: str,
+    target_object: str,
+    moondream_url: str = "http://localhost:2020",
+    timeout: int = 30
+) -> Dict[str, Any]:
+    """
+    Run complete Moondream testing suite including health check and pointing test.
+
+    Args:
+        image_path: Path to the image file to analyze
+        target_object: Description of the object to find
+        moondream_url: Base URL of the Moondream server
+        timeout: Request timeout in seconds
+
+    Returns:
+        Dictionary containing complete test results
+    """
+
+    suite_result = {
+        "test_suite_success": False,
+        "health_check": None,
+        "pointing_test": None,
+        "recommendations": [],
+        "automation_ready": False
+    }
+
+    try:
+        # Run health check first
+        health_result = await test_moondream_health(moondream_url, 5)
+        suite_result["health_check"] = health_result
+
+        if not health_result["server_accessible"]:
+            suite_result["recommendations"].extend([
+                "Make sure Moondream server is running",
+                f"Check that server is accessible at {moondream_url}",
+                "Verify server accepts requests on /v1/point endpoint"
+            ])
+            return suite_result
+
+        # Run pointing test
+        pointing_url = f"{moondream_url.rstrip('/')}/v1/point"
+        pointing_result = await test_moondream_pointing(
+            image_path, target_object, pointing_url, timeout
+        )
+        suite_result["pointing_test"] = pointing_result
+
+        # Determine overall success
+        if pointing_result["success"] and health_result["server_accessible"]:
+            suite_result["test_suite_success"] = True
+            suite_result["automation_ready"] = True
+            suite_result["recommendations"].extend([
+                "Integrate pointing into browser automation tools",
+                "Create intelligent click tool using coordinates",
+                "Test with real browser screenshots"
+            ])
+        else:
+            if not pointing_result["success"]:
+                suite_result["recommendations"].extend([
+                    "Check image quality and format",
+                    "Try different search terms for the target object",
+                    "Verify object is clearly visible in the image"
+                ])
+
+        return suite_result
+
+    except Exception as e:
+        suite_result["error"] = f"Test suite error: {str(e)}"
+        return suite_result
 # @mcp.tool()
 # async def get_element_data(selector: str) -> List[TextContent]:
 #     """Get data about elements matching the selector"""
